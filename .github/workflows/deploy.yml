@@ -1,0 +1,62 @@
+name: Deploy
+
+# Deploy button for the build-farm.  Each repo declares its deploy command in
+# its `.ci.yml` under `deploy:` (single-line).  Deploy secrets (SSH keys, deploy
+# tokens) live in THIS repo's secrets and are exposed to the deploy step as env
+# vars (VDS_SSH_KEY, DEPLOY_TOKEN, ...).  SECURITY: write/merge here must stay
+# owners-only — a merged malicious commit could otherwise read deploy secrets.
+
+on:
+  workflow_dispatch:
+    inputs:
+      repo:
+        description: "Repo to deploy"
+        type: choice
+        options:
+          - StitchWB/Stitch-Account-Manager
+          - WhiteBite/AIApiRadar
+
+concurrency:
+  group: stitch-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: "Deploy: ${{ github.event.inputs.repo }}"
+    runs-on: ubuntu-latest
+    steps:
+      - name: "Checkout ${{ github.event.inputs.repo }} (read-only)"
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.inputs.repo }}
+          token: ${{ secrets.MONOREPO_READ_TOKEN }}
+          submodules: recursive
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Read .ci.yml deploy command
+        id: ci
+        run: |
+          pip install -q pyyaml
+          python - <<'PY'
+          import os, yaml
+          cfg = {}
+          if os.path.exists(".ci.yml"):
+              cfg = yaml.safe_load(open(".ci.yml", encoding="utf-8")) or {}
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write("workdir=" + str(cfg.get("workdir", ".") or ".") + "\n")
+              f.write("deploy=" + str(cfg.get("deploy", "") or "") + "\n")
+          PY
+
+      - name: Deploy
+        if: steps.ci.outputs.deploy != ''
+        working-directory: ${{ steps.ci.outputs.workdir }}
+        env:
+          VDS_SSH_KEY: ${{ secrets.VDS_SSH_KEY }}
+          DEPLOY_TOKEN: ${{ secrets.DEPLOY_TOKEN }}
+          STITCH_PUBLISH_URL: ${{ secrets.STITCH_PUBLISH_URL }}
+          STITCH_ADMIN_KEY: ${{ secrets.STITCH_ADMIN_KEY }}
+        run: ${{ steps.ci.outputs.deploy }}
