@@ -1,0 +1,75 @@
+name: CI build-farm
+
+# Free-public-minutes CI for the private Stitch monorepo.
+#
+# Pattern (same as stitch-build): a PUBLIC repo whose CI checks out the PRIVATE
+# monorepo at build time via a READ-ONLY token (MONOREPO_READ_TOKEN, stored as a
+# secret) and runs the heavy test/build jobs on free public minutes.  The private
+# code is never published; it is only checked out transiently on the runner.
+#
+# SECURITY: this repo must have WRITE/MERGE restricted to the owners only — a
+# merged malicious commit could otherwise read the read-token secret.  Fork PRs
+# never receive secrets, so external contributions are safe.
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    # Nightly heavy CI on free minutes.
+    - cron: "17 3 * * *"
+
+concurrency:
+  group: stitch-ci
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: Python tests (free minutes)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout private monorepo (read-only, with submodules)
+        uses: actions/checkout@v4
+        with:
+          repository: StitchWB/Stitch-Account-Manager
+          token: ${{ secrets.MONOREPO_READ_TOKEN }}
+          submodules: recursive
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: python/requirements*.txt
+
+      - name: Install deps
+        working-directory: python
+        run: pip install -e ".[dev]"
+
+      - name: Run test suite
+        working-directory: python
+        run: python -m pytest tests -q
+
+  build-smoke:
+    name: Nuitka build smoke (free minutes)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout private monorepo (read-only, with submodules)
+        uses: actions/checkout@v4
+        with:
+          repository: StitchWB/Stitch-Account-Manager
+          token: ${{ secrets.MONOREPO_READ_TOKEN }}
+          submodules: recursive
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install deps + nuitka
+        working-directory: python
+        run: |
+          pip install -e ".[dev]"
+          pip install nuitka
+
+      - name: Build smoke (compile autoreg)
+        working-directory: python
+        run: python ../scripts/compile_autoreg.py --check
