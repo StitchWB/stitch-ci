@@ -3,15 +3,13 @@ name: CI build-farm
 # Free-public-minutes CI build-farm for MANY private repos.
 #
 # Pattern: a PUBLIC repo (write/merge restricted to the owners) whose CI checks
-# out each PRIVATE repo at build time via a READ-ONLY token (MONOREPO_READ_TOKEN,
-# a fine-grained token scoped to READ all the listed repos) and runs that repo's
-# CI on free public minutes.  Private code is never published — only checked out
-# transiently on the runner.  Fork PRs never receive the secret, so external
-# contributions are safe; only a merged malicious commit (owners-only) could read
-# the token.
+# out each PRIVATE repo (read-only, via MONOREPO_READ_TOKEN — a fine-grained
+# token scoped READ to all listed repos) and runs that repo's OWN CI contract
+# from its `.ci.yml` (workdir/install/test).  Private code is never published —
+# only checked out transiently.  Fork PRs never receive the secret.
 #
-# To add a repo: append an entry to the matrix `include` below with its
-# `repo`, optional `submodules`, and its install/test commands.
+# To add a repo: append its full name to the matrix `repo` list AND drop a
+# `.ci.yml` (workdir/install/test) into that repo.  No per-repo commands here.
 
 on:
   workflow_dispatch: {}
@@ -24,42 +22,49 @@ concurrency:
 
 jobs:
   ci:
-    name: "CI: ${{ matrix.name }}"
+    name: "CI: ${{ matrix.repo }}"
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - name: stitch-monorepo
-            repo: StitchWB/Stitch-Account-Manager
-            submodules: recursive
-            workdir: python
-            install: 'pip install -e ".[dev]"'
-            test: "python -m pytest tests -q"
-          - name: aiapiradar
-            repo: WhiteBite/AIApiRadar
-            submodules: ""
-            workdir: "."
-            install: "pip install -r requirements.txt"
-            test: "python -m pytest tests -q"
+        repo:
+          - StitchWB/Stitch-Account-Manager
+          - WhiteBite/AIApiRadar
     steps:
       - name: "Checkout ${{ matrix.repo }} (read-only)"
         uses: actions/checkout@v4
         with:
           repository: ${{ matrix.repo }}
           token: ${{ secrets.MONOREPO_READ_TOKEN }}
-          submodules: ${{ matrix.submodules || '' }}
+          submodules: recursive
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-          cache: "pip"
+
+      - name: Read .ci.yml contract
+        id: ci
+        run: |
+          pip install -q pyyaml
+          python - <<'PY'
+          import os, yaml
+          cfg = {}
+          if os.path.exists(".ci.yml"):
+              cfg = yaml.safe_load(open(".ci.yml", encoding="utf-8")) or {}
+          out = os.environ["GITHUB_OUTPUT"]
+          with open(out, "a") as f:
+              f.write("workdir=" + str(cfg.get("workdir", ".") or ".") + "\n")
+              f.write("install=" + str(cfg.get("install", "") or "") + "\n")
+              f.write("test=" + str(cfg.get("test", "") or "") + "\n")
+          PY
 
       - name: Install deps
-        working-directory: ${{ matrix.workdir }}
-        run: ${{ matrix.install }}
+        if: steps.ci.outputs.install != ''
+        working-directory: ${{ steps.ci.outputs.workdir }}
+        run: ${{ steps.ci.outputs.install }}
 
       - name: Run tests
-        working-directory: ${{ matrix.workdir }}
-        run: ${{ matrix.test }}
+        if: steps.ci.outputs.test != ''
+        working-directory: ${{ steps.ci.outputs.workdir }}
+        run: ${{ steps.ci.outputs.test }}
