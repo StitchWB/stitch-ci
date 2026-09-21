@@ -68,9 +68,11 @@ jobs:
           new_tags = [t for t in tags if t not in old_tags]
 
           def dispatch(workflow, inputs=None):
+              # GITHUB_TOKEN cannot trigger workflow_dispatch (403); the PAT
+              # that reads the monorepo also dispatches this public repo.
               status, _ = api(
                   f"https://api.github.com/repos/{SELF}/actions/workflows/{workflow}/dispatches",
-                  selftok, method="POST", body={"ref": "main", "inputs": inputs or {}},
+                  read, method="POST", body={"ref": "main", "inputs": inputs or {}},
               )
               print(f"dispatch {workflow}: HTTP {status}")
 
