@@ -28,8 +28,6 @@ concurrency:
 jobs:
   ci:
     name: "CI: ${{ matrix.repo }}"
-    # Run when: cron (no input), or input==all, or this job's repo was chosen.
-    if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.repo == 'all' || github.event.inputs.repo == matrix.repo }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -38,7 +36,19 @@ jobs:
           - StitchWB/Stitch-Account-Manager
           - WhiteBite/AIApiRadar
     steps:
+      # matrix is not available in a job-level `if`, so the selection lives in
+      # this gate step and every work step checks its output.
+      - name: Selection gate
+        id: gate
+        run: |
+          if [ "${{ github.event_name }}" != "workflow_dispatch" ] || [ "${{ github.event.inputs.repo }}" = "all" ] || [ "${{ github.event.inputs.repo }}" = "${{ matrix.repo }}" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: "Checkout ${{ matrix.repo }} (read-only)"
+        if: steps.gate.outputs.run == 'true'
         uses: actions/checkout@v4
         with:
           repository: ${{ matrix.repo }}
@@ -46,11 +56,13 @@ jobs:
           submodules: recursive
 
       - name: Setup Python
+        if: steps.gate.outputs.run == 'true'
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
       - name: Read .ci.yml contract
+        if: steps.gate.outputs.run == 'true'
         id: ci
         run: |
           pip install -q pyyaml
@@ -66,11 +78,11 @@ jobs:
           PY
 
       - name: Install deps
-        if: steps.ci.outputs.install != ''
+        if: steps.gate.outputs.run == 'true' && steps.ci.outputs.install != ''
         working-directory: ${{ steps.ci.outputs.workdir }}
         run: ${{ steps.ci.outputs.install }}
 
       - name: Run tests
-        if: steps.ci.outputs.test != ''
+        if: steps.gate.outputs.run == 'true' && steps.ci.outputs.test != ''
         working-directory: ${{ steps.ci.outputs.workdir }}
         run: ${{ steps.ci.outputs.test }}
