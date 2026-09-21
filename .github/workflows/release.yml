@@ -22,6 +22,8 @@ jobs:
   build:
     name: Build (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    outputs:
+      sha: ${{ steps.mono_sha.outputs.sha }}
     strategy:
       matrix:
         include:
@@ -43,6 +45,22 @@ jobs:
           repository: StitchWB/Stitch-Account-Manager
           token: ${{ secrets.SUBMODULE_READ_TOKEN }}
           submodules: recursive
+
+      - name: Resolve tested sha
+        id: mono_sha
+        shell: bash
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Report pending status
+        shell: bash
+        env:
+          READ_TOKEN: ${{ secrets.MONOREPO_READ_TOKEN }}
+        run: |
+          curl -sf -X POST \
+            -H "Authorization: Bearer $READ_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -d '{"state":"pending","context":"stitch-ci/release-${{ matrix.os }}","target_url":"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"}' \
+            "https://api.github.com/repos/StitchWB/Stitch-Account-Manager/statuses/${{ steps.mono_sha.outputs.sha }}" || true
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -163,6 +181,21 @@ jobs:
           name: stitch-portable
           path: ${{ env.PORTABLE_PATH }}
 
+      - name: Report final status
+        if: always()
+        shell: bash
+        env:
+          READ_TOKEN: ${{ secrets.MONOREPO_READ_TOKEN }}
+          JOB_STATE: ${{ job.status }}
+        run: |
+          STATE=success
+          [ "$JOB_STATE" = "success" ] || STATE=failure
+          curl -sf -X POST \
+            -H "Authorization: Bearer $READ_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -d "{\"state\":\"$STATE\",\"context\":\"stitch-ci/release-${{ matrix.os }}\",\"target_url\":\"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}" \
+            "https://api.github.com/repos/StitchWB/Stitch-Account-Manager/statuses/${{ steps.mono_sha.outputs.sha }}" || true
+
   publish:
     name: Publish to Stitch-Releases
     needs: build
@@ -209,3 +242,17 @@ jobs:
           ./stitch-linux-${VERSION}
           \`\`\`" \
             $FILES
+
+      - name: Report final status
+        if: always()
+        env:
+          READ_TOKEN: ${{ secrets.MONOREPO_READ_TOKEN }}
+          JOB_STATE: ${{ job.status }}
+        run: |
+          STATE=success
+          [ "$JOB_STATE" = "success" ] || STATE=failure
+          curl -sf -X POST \
+            -H "Authorization: Bearer $READ_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -d "{\"state\":\"$STATE\",\"context\":\"stitch-ci/release-publish\",\"target_url\":\"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}" \
+            "https://api.github.com/repos/StitchWB/Stitch-Account-Manager/statuses/${{ needs.build.outputs.sha }}" || true

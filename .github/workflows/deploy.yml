@@ -34,6 +34,20 @@ jobs:
           token: ${{ secrets.MONOREPO_READ_TOKEN }}
           submodules: recursive
 
+      - name: Resolve tested sha
+        id: mono_sha
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Report pending status
+        env:
+          READ_TOKEN: ${{ secrets.MONOREPO_READ_TOKEN }}
+        run: |
+          curl -sf -X POST \
+            -H "Authorization: Bearer $READ_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -d '{"state":"pending","context":"stitch-ci/deploy","target_url":"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"}' \
+            "https://api.github.com/repos/StitchWB/Stitch-Account-Manager/statuses/${{ steps.mono_sha.outputs.sha }}" || true
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
@@ -57,6 +71,20 @@ jobs:
       - name: Deploy to VDS
         shell: pwsh
         run: ./scripts/deploy-vds.ps1 -SkipBuild
+
+      - name: Report final status
+        if: always()
+        env:
+          READ_TOKEN: ${{ secrets.MONOREPO_READ_TOKEN }}
+          JOB_STATE: ${{ job.status }}
+        run: |
+          STATE=success
+          [ "$JOB_STATE" = "success" ] || STATE=failure
+          curl -sf -X POST \
+            -H "Authorization: Bearer $READ_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -d "{\"state\":\"$STATE\",\"context\":\"stitch-ci/deploy\",\"target_url\":\"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}" \
+            "https://api.github.com/repos/StitchWB/Stitch-Account-Manager/statuses/${{ steps.mono_sha.outputs.sha }}" || true
 
   deploy:
     name: "Deploy: ${{ github.event.inputs.repo }}"

@@ -24,6 +24,20 @@ jobs:
           token: ${{ secrets.MONOREPO_READ_TOKEN }}
           submodules: recursive
 
+      - name: Resolve tested sha
+        id: mono_sha
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Report pending status
+        env:
+          READ_TOKEN: ${{ secrets.MONOREPO_READ_TOKEN }}
+        run: |
+          curl -sf -X POST \
+            -H "Authorization: Bearer $READ_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -d '{"state":"pending","context":"stitch-ci/export-services","target_url":"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"}' \
+            "https://api.github.com/repos/StitchWB/Stitch-Account-Manager/statuses/${{ steps.mono_sha.outputs.sha }}" || true
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
@@ -39,3 +53,17 @@ jobs:
           else
             python scripts/export_services.py --dest /tmp/svc-export --push
           fi
+
+      - name: Report final status
+        if: always()
+        env:
+          READ_TOKEN: ${{ secrets.MONOREPO_READ_TOKEN }}
+          JOB_STATE: ${{ job.status }}
+        run: |
+          STATE=success
+          [ "$JOB_STATE" = "success" ] || STATE=failure
+          curl -sf -X POST \
+            -H "Authorization: Bearer $READ_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -d "{\"state\":\"$STATE\",\"context\":\"stitch-ci/export-services\",\"target_url\":\"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}" \
+            "https://api.github.com/repos/StitchWB/Stitch-Account-Manager/statuses/${{ steps.mono_sha.outputs.sha }}" || true
