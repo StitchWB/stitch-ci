@@ -1,0 +1,211 @@
+name: Release
+
+# Full binary release (Nuitka-compiled autoreg + installer + portable) for
+# the private monorepo, on this public repo's free minutes.  Dispatch-only:
+# give the tag (e.g. v1.2.3); the poll orchestrator dispatches it when a new
+# v* tag appears on the monorepo.  Publishes to StitchWB/Stitch-Releases.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag on the monorepo (e.g. v1.2.3)"
+        required: true
+        type: string
+  workflow_call:
+    inputs:
+      tag:
+        required: true
+        type: string
+
+jobs:
+  build:
+    name: Build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            artifact_name: stitch-backend.exe
+            asset_name: stitch-windows
+            asset_ext: .exe
+            pyinstaller_dist: stitch-backend.exe
+          - os: ubuntu-latest
+            artifact_name: stitch-backend
+            asset_name: stitch-linux
+            asset_ext: ''
+            pyinstaller_dist: stitch-backend
+
+    steps:
+      - name: Checkout monorepo
+        uses: actions/checkout@v4
+        with:
+          repository: StitchWB/Stitch-Account-Manager
+          token: ${{ secrets.SUBMODULE_READ_TOKEN }}
+          submodules: recursive
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Sync version with tag
+        shell: bash
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          VERSION=${TAG#v}
+          echo "Building version $VERSION"
+          npm version "$VERSION" --no-git-tag-version --allow-same-version || true
+          python scripts/generate_version.py "$VERSION"
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build frontend
+        run: npm run build
+
+      - name: Install Python dependencies
+        working-directory: python
+        run: |
+          pip install -e ".[dev]"
+          pip install pyinstaller nuitka zstandard ordered-set
+
+      - name: Setup MSVC (Windows)
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Run Python tests
+        working-directory: python
+        run: pytest tests -q --tb=short
+
+      - name: Cache compiled autoreg modules
+        id: autoreg-cache
+        uses: actions/cache@v4
+        with:
+          path: python/autoreg_compiled
+          key: ${{ runner.os }}-python-3.12-autoreg-${{ hashFiles('python/autoreg/**/*.py', 'scripts/compile_autoreg.py') }}
+
+      - name: Compile autoreg (Nuitka)
+        if: steps.autoreg-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: python scripts/compile_autoreg.py
+
+      - name: Build standalone executable
+        working-directory: python
+        shell: bash
+        run: pyinstaller stitch-backend.spec --distpath dist
+
+      - name: Rename portable artifact
+        shell: bash
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          VERSION=${TAG#v}
+          SRC="python/dist/${{ matrix.pyinstaller_dist }}"
+          DST="${{ matrix.asset_name }}-${VERSION}${{ matrix.asset_ext }}"
+          mv "$SRC" "$DST"
+          echo "ARTIFACT_PATH=$DST" >> $GITHUB_ENV
+          echo "ARTIFACT_NAME=$DST" >> $GITHUB_ENV
+
+      - name: Install NSIS (Windows)
+        if: runner.os == 'Windows'
+        run: choco install nsis -y --no-progress
+
+      - name: Build NSIS installer (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          VERSION=${TAG#v}
+          MAKENSIS="C:/Program Files (x86)/NSIS/makensis.exe"
+          [ -x "$MAKENSIS" ] || MAKENSIS="$(command -v makensis)"
+          "$MAKENSIS" //DVERSION=$VERSION installer.nsi
+          echo "INSTALLER_PATH=stitch-setup-${VERSION}.exe" >> $GITHUB_ENV
+
+      - name: Create portable zip (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          VERSION=${TAG#v}
+          mkdir -p portable/StitchManager
+          cp python/dist/stitch-backend.exe portable/StitchManager/
+          cp resources/icons/app-icon.ico portable/StitchManager/ || true
+          cd portable && zip -r ../stitch-portable-${VERSION}.zip StitchManager && cd ..
+          echo "PORTABLE_PATH=stitch-portable-${VERSION}.zip" >> $GITHUB_ENV
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset_name }}
+          path: ${{ env.ARTIFACT_PATH }}
+
+      - name: Upload installer (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: stitch-setup
+          path: ${{ env.INSTALLER_PATH }}
+
+      - name: Upload portable zip (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: stitch-portable
+          path: ${{ env.PORTABLE_PATH }}
+
+  publish:
+    name: Publish to Stitch-Releases
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+
+      - name: List artifacts
+        run: find artifacts/ -type f
+
+      - name: Create release in Stitch-Releases
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.RELEASES_PAT }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          VERSION=${TAG#v}
+          FILES=$(find artifacts/ -type f | tr '\n' ' ')
+          gh release create "$TAG" \
+            --repo StitchWB/Stitch-Releases \
+            --title "Stitch Account Manager $TAG" \
+            --notes "## Stitch Account Manager $TAG
+
+          ### Download
+
+          | Platform | File | Type |
+          |----------|------|------|
+          | Windows  | \`stitch-setup-${VERSION}.exe\` | Installer (recommended) |
+          | Windows  | \`stitch-portable-${VERSION}.zip\` | Portable |
+          | Linux    | \`stitch-linux-${VERSION}\` | Standalone binary |
+
+          ### Install
+
+          **Windows (installer):** Run \`stitch-setup-${VERSION}.exe\`.
+
+          **Windows (portable):** Extract zip anywhere, run \`stitch-backend.exe\`.
+
+          **Linux:**
+          \`\`\`bash
+          chmod +x stitch-linux-${VERSION}
+          ./stitch-linux-${VERSION}
+          \`\`\`" \
+            $FILES

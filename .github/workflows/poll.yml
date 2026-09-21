@@ -1,0 +1,116 @@
+name: Poll monorepo
+
+# Orchestrator: the public farm cannot receive events from the private
+# monorepo, so this polls its HEAD + tags every 10 minutes and dispatches the
+# farm workflows whose path filters match the change set.  State (last seen
+# sha + tags) lives in state/monorepo.json in THIS repo.
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: poll-monorepo
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  poll:
+    name: Poll monorepo and dispatch farm workflows
+    runs-on: ubuntu-latest
+    steps:
+      - name: Poll and dispatch
+        env:
+          READ_TOKEN: ${{ secrets.MONOREPO_READ_TOKEN }}
+          SELF_TOKEN: ${{ github.token }}
+        run: |
+          python - <<'PY'
+          import base64, json, os, urllib.request
+
+          MONO = "StitchWB/Stitch-Account-Manager"
+          SELF = "StitchWB/stitch-ci"
+          STATE_PATH = "state/monorepo.json"
+
+          def api(url, token, method="GET", body=None):
+              req = urllib.request.Request(url, method=method)
+              req.add_header("Authorization", f"Bearer {token}")
+              req.add_header("Accept", "application/vnd.github+json")
+              req.add_header("User-Agent", "stitch-ci-poll")
+              if body is not None:
+                  req.add_header("Content-Type", "application/json")
+                  req.data = json.dumps(body).encode()
+              try:
+                  with urllib.request.urlopen(req) as resp:
+                      return resp.status, resp.read()
+              except urllib.error.HTTPError as exc:
+                  return exc.code, exc.read()
+
+          read = os.environ["READ_TOKEN"]
+          selftok = os.environ["SELF_TOKEN"]
+
+          status, raw = api(f"https://api.github.com/repos/{MONO}", read)
+          head = json.loads(raw)["default_branch"]
+          status, raw = api(f"https://api.github.com/repos/{MONO}/git/ref/heads/{head}", read)
+          sha = json.loads(raw)["object"]["sha"]
+          status, raw = api(f"https://api.github.com/repos/{MONO}/tags?per_page=100", read)
+          tags = [t["name"] for t in json.loads(raw)]
+
+          status, raw = api(f"https://api.github.com/repos/{SELF}/contents/{STATE_PATH}", selftok)
+          old_sha, file_sha, old_tags = None, None, []
+          if status == 200:
+              meta = json.loads(raw)
+              file_sha = meta["sha"]
+              state = json.loads(base64.b64decode(meta["content"]))
+              old_sha, old_tags = state.get("sha"), state.get("tags", [])
+          new_tags = [t for t in tags if t not in old_tags]
+
+          def dispatch(workflow, inputs=None):
+              status, _ = api(
+                  f"https://api.github.com/repos/{SELF}/actions/workflows/{workflow}/dispatches",
+                  selftok, method="POST", body={"ref": "main", "inputs": inputs or {}},
+              )
+              print(f"dispatch {workflow}: HTTP {status}")
+
+          if old_sha is None:
+              print(f"first run: recording sha {sha}, tags {tags}; dispatching ci only")
+              dispatch("ci.yml", {"repo": MONO})
+          elif old_sha == sha and not new_tags:
+              print(f"no change (sha {sha[:8]}, {len(tags)} tags)")
+          else:
+              paths = []
+              if old_sha:
+                  status, raw = api(f"https://api.github.com/repos/{MONO}/compare/{old_sha}...{sha}", read)
+                  if status == 200:
+                      paths = [f["filename"] for f in json.loads(raw).get("files", [])]
+                  print(f"compare {old_sha[:8]}...{sha[:8]}: {len(paths)} files")
+              def hit(prefixes):
+                  return any(p.startswith(prefixes) if isinstance(prefixes, str)
+                             else any(p.startswith(x) for x in prefixes) for p in paths)
+              dispatch("ci.yml", {"repo": MONO})
+              if hit(("python/autoreg/", "python/stitch_backend/", "python/stitch_plugin_tools/",
+                      "python/requirements", "python/pyproject.toml", "python/stitch-backend.spec",
+                      "scripts/compile_autoreg.py")):
+                  dispatch("build-smoke.yml")
+              if hit(("python/stitch_bot/", "python/stitch_server/", "scripts/export_services.py")):
+                  dispatch("export-services.yml")
+              if hit("plugins-src/"):
+                  dispatch("publish-service-plugins.yml")
+              for tag in new_tags:
+                  if tag.startswith("v"):
+                      dispatch("release.yml", {"tag": tag})
+
+          body = json.dumps({"sha": sha, "tags": tags}, indent=2).encode()
+          payload = {
+              "message": f"chore(poll): monorepo state {sha[:8]}",
+              "content": base64.b64encode(body).decode(),
+              "branch": "main",
+          }
+          if file_sha:
+              payload["sha"] = file_sha
+          status, raw = api(f"https://api.github.com/repos/{SELF}/contents/{STATE_PATH}",
+                            selftok, method="PUT", body=payload)
+          print(f"state commit: HTTP {status}")
+          PY

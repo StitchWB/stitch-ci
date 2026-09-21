@@ -86,3 +86,52 @@ jobs:
         if: steps.gate.outputs.run == 'true' && steps.ci.outputs.test != ''
         working-directory: ${{ steps.ci.outputs.workdir }}
         run: ${{ steps.ci.outputs.test }}
+
+  frontend:
+    name: "Frontend: StitchWB/Stitch-Account-Manager"
+    runs-on: ubuntu-latest
+    steps:
+      # Same selection semantics as the python job, monorepo-only.
+      - name: Selection gate
+        id: gate
+        run: |
+          if [ "${{ github.event_name }}" != "workflow_dispatch" ] || [ "${{ github.event.inputs.repo }}" = "all" ] || [ "${{ github.event.inputs.repo }}" = "StitchWB/Stitch-Account-Manager" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout monorepo (read-only)
+        if: steps.gate.outputs.run == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: StitchWB/Stitch-Account-Manager
+          token: ${{ secrets.MONOREPO_READ_TOKEN }}
+          submodules: recursive
+
+      - name: Setup Node.js
+        if: steps.gate.outputs.run == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+
+      - name: Install dependencies
+        if: steps.gate.outputs.run == 'true'
+        run: npm ci
+
+      - name: TypeScript check
+        if: steps.gate.outputs.run == 'true'
+        run: npx tsc --noEmit
+
+      - name: Frontend tests (Jest)
+        if: steps.gate.outputs.run == 'true'
+        run: npx jest --no-coverage --passWithNoTests
+
+      - name: Lint
+        if: steps.gate.outputs.run == 'true'
+        run: npm run lint --if-present
+
+      - name: Build frontend
+        if: steps.gate.outputs.run == 'true'
+        run: npm run build

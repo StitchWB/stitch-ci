@@ -1,0 +1,41 @@
+name: Export services
+
+# Sync stitch_bot / stitch_server from the private monorepo into their
+# standalone repos (scripts/export_services.py --push).  Runs on this public
+# repo's free minutes; the monorepo's own copy of this workflow is
+# billing-blocked.
+
+on:
+  workflow_dispatch: {}
+  workflow_call: {}
+
+concurrency:
+  group: export-services
+  cancel-in-progress: false
+
+jobs:
+  export:
+    name: Sync stitch_bot/stitch_server to standalone repos
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: StitchWB/Stitch-Account-Manager
+          token: ${{ secrets.MONOREPO_READ_TOKEN }}
+          submodules: recursive
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Export services
+        env:
+          SERVICE_EXPORT_TOKEN: ${{ secrets.SERVICE_EXPORT_TOKEN }}
+        run: |
+          if [ -z "$SERVICE_EXPORT_TOKEN" ]; then
+            echo "export skipped: SERVICE_EXPORT_TOKEN not configured"
+            python scripts/export_services.py --dest /tmp/svc-export
+          else
+            python scripts/export_services.py --dest /tmp/svc-export --push
+          fi

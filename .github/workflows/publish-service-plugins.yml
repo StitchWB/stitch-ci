@@ -1,0 +1,157 @@
+name: Publish service plugins
+
+# Publishes the 9 official service plugins as signed packages from the
+# private monorepo, on this public repo's free minutes.  Port of the
+# monorepo's publish-service-plugins.yml (same steps, same secrets).
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Plugin version (semver) — overrides the manifest version"
+        required: false
+        default: ""
+  workflow_call:
+    inputs:
+      version:
+        type: string
+        default: ""
+
+concurrency:
+  group: service-plugins-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Assemble, sign, and publish ${{ matrix.plugin }} service plugin
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        plugin: [antigravity, cards, freemodel, mail, notebooklm, opencode, radar, sheets, totp]
+      fail-fast: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: StitchWB/Stitch-Account-Manager
+          token: ${{ secrets.MONOREPO_READ_TOKEN }}
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          pip install -e python/
+          pip install httpx
+
+      - name: Leak check (grep-blocker)
+        run: python scripts/check_export_leaks.py
+
+      - name: Determine version
+        id: version
+        env:
+          PLUGIN_NAME: stitch-${{ matrix.plugin }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          if [ -n "$INPUT_VERSION" ]; then
+            echo "version=$INPUT_VERSION" >> "$GITHUB_OUTPUT"
+          else
+            VERSION=$(python -c "import json, os; print(json.load(open(os.path.join('plugins-src', os.environ['PLUGIN_NAME'], 'plugin.json')))['version'])")
+            echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Assemble service plugin
+        env:
+          PLUGIN_NAME: stitch-${{ matrix.plugin }}
+          PACK_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          python - <<'PYEOF'
+          import json, os, shutil
+          from pathlib import Path
+          name = os.environ['PLUGIN_NAME']
+          version = os.environ['PACK_VERSION']
+          src = Path(f'plugins-src/{name}')
+          dst = Path(f'/tmp/{name}')
+          if dst.exists():
+              shutil.rmtree(dst)
+          shutil.copytree(
+              src, dst,
+              ignore=shutil.ignore_patterns('__pycache__', '*.pyc'),
+          )
+          manifest_path = dst / 'plugin.json'
+          manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
+          if manifest.get('version') != version:
+              manifest['version'] = version
+              manifest_path.write_text(
+                  json.dumps(manifest, indent=2) + '\n', encoding='utf-8')
+          print(f'Assembled {name} service plugin at {dst} (version {version})')
+          PYEOF
+
+      - name: Assert staged version matches PACK_VERSION
+        env:
+          PLUGIN_NAME: stitch-${{ matrix.plugin }}
+          PACK_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          STAGED_VERSION=$(python -c "import json, os; print(json.load(open(os.path.join('/tmp', os.environ['PLUGIN_NAME'], 'plugin.json')))['version'])")
+          if [ "$STAGED_VERSION" != "$PACK_VERSION" ]; then
+            echo "::error::Staged plugin.json version '$STAGED_VERSION' does not match PACK_VERSION '$PACK_VERSION'"
+            exit 1
+          fi
+          echo "Staged version OK: $STAGED_VERSION"
+
+      - name: Vendor RpcPluginServer into staged package
+        env:
+          PLUGIN_NAME: stitch-${{ matrix.plugin }}
+        run: |
+          python -m stitch_plugin_tools vendor /tmp/stitch-${{ matrix.plugin }}
+
+      - name: Sign and publish service plugin
+        env:
+          STITCH_SIGNING_KEY: ${{ secrets.STITCH_SIGNING_KEY }}
+          STITCH_PUBLISH_URL: ${{ secrets.STITCH_PUBLISH_URL }}
+          STITCH_ADMIN_KEY: ${{ secrets.STITCH_ADMIN_KEY }}
+          PLUGIN_NAME: stitch-${{ matrix.plugin }}
+          PACK_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          if [ -z "$STITCH_SIGNING_KEY" ]; then
+            echo "::error::STITCH_SIGNING_KEY not configured — cannot sign"
+            exit 1
+          fi
+          if [ -z "$STITCH_PUBLISH_URL" ] || [ -z "$STITCH_ADMIN_KEY" ]; then
+            echo "::warning::STITCH_PUBLISH_URL or STITCH_ADMIN_KEY not configured — skipping publish"
+            exit 0
+          fi
+          # mktemp creates the keyfile 0600; the trap wipes it on exit.
+          KEYFILE=$(mktemp)
+          export KEYFILE
+          printf '%s' "$STITCH_SIGNING_KEY" > "$KEYFILE"
+          trap 'rm -f "$KEYFILE"' EXIT
+          python - <<'PYEOF'
+          import asyncio, os
+          from pathlib import Path
+          from autoreg.plugin import crypto
+          from stitch_plugin_tools.publish import publish_package
+
+          async def main():
+              name = os.environ['PLUGIN_NAME']
+              base = Path(f'/tmp/{name}')
+              key = Path(os.environ['KEYFILE']).read_bytes()
+              publish_url = os.environ['STITCH_PUBLISH_URL']
+              admin_key = os.environ['STITCH_ADMIN_KEY']
+
+              sig = crypto.sign_package(base, key)
+              crypto.write_signature(base, sig)
+
+              result = await publish_package(
+                  base,
+                  server_url=publish_url,
+                  admin_key=admin_key,
+                  signing_key_pem=None,
+                  rollout_percent=100,
+              )
+              print(f'Published {name}: {result}')
+
+          asyncio.run(main())
+          PYEOF

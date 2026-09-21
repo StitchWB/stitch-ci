@@ -1,0 +1,65 @@
+name: Build Smoke
+
+# Heavy Nuitka + PyInstaller verification for the private monorepo, run on
+# this public repo's free minutes (the monorepo's own Actions are
+# billing-blocked).  Mirrors the monorepo's build-smoke.yml contract.
+
+on:
+  workflow_dispatch: {}
+  workflow_call: {}
+
+concurrency:
+  group: build-smoke
+  cancel-in-progress: true
+
+jobs:
+  build-smoke:
+    name: Build Smoke (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: StitchWB/Stitch-Account-Manager
+          token: ${{ secrets.MONOREPO_READ_TOKEN }}
+          submodules: recursive
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Build frontend
+        run: |
+          npm ci
+          npm run build
+
+      - name: Install Python dependencies
+        working-directory: python
+        run: |
+          pip install -e ".[dev]"
+          pip install pyinstaller nuitka zstandard ordered-set
+
+      - name: Setup MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Compile autoreg (Nuitka)
+        run: python scripts/compile_autoreg.py
+
+      - name: Verify PyInstaller build
+        working-directory: python
+        run: pyinstaller stitch-backend.spec --distpath dist --noconfirm
+
+      - name: Verify artifact exists
+        run: |
+          if (!(Test-Path python/dist/stitch-backend.exe)) {
+            Write-Error "PyInstaller did not produce stitch-backend.exe"
+            exit 1
+          }
+          $size = (Get-Item python/dist/stitch-backend.exe).Length / 1MB
+          Write-Host "OK: stitch-backend.exe ($([math]::Round($size,1)) MB)"
