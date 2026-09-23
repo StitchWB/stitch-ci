@@ -1,0 +1,203 @@
+name: Publish engine-pack
+
+# Farm port of the hub's publish-engine-pack.yml (hub Actions are disabled;
+# this public CI farm is the only CI/CD control plane). Checks the hub out
+# read-only. The farm cannot receive hub push events, so runs start from
+# the manual button or a poll.yml dispatch when engine-pack paths change.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Engine-pack version (semver)"
+        required: false
+        default: ""
+      variants:
+        description: "Number of watermarked variants to publish (default 8)"
+        required: false
+        default: "8"
+
+concurrency:
+  group: engine-pack-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Assemble, sign, and publish engine-pack
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: StitchWB/Stitch-Account-Manager
+          token: ${{ secrets.MONOREPO_READ_TOKEN }}
+          submodules: recursive  # needed for vendor/turnstile-solver
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          pip install -e python/
+
+      - name: Leak check (grep-blocker)
+        run: python scripts/check_export_leaks.py
+
+      - name: Determine version
+        id: version
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            echo "version=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
+          else
+            # Date + short git SHA avoids collisions when multiple publishes
+            # land on the same day.  %-m/%-d strip leading zeros (semver
+            # forbids them, e.g. "08" is invalid).  GNU date on ubuntu-latest.
+            SHORT_SHA=$(git rev-parse --short HEAD)
+            echo "version=$(date +%Y.%-m.%-d)+${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Determine variant count
+        id: variants
+        run: |
+          VARIANTS="${{ github.event.inputs.variants }}"
+          if [ -z "$VARIANTS" ]; then
+            VARIANTS="8"
+          fi
+          echo "count=$VARIANTS" >> "$GITHUB_OUTPUT"
+
+      - name: Assemble engine-pack
+        env:
+          PACK_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          python -c "
+          import os
+          from pathlib import Path
+          from stitch_plugin_tools.publish import pack_engine
+          version = os.environ['PACK_VERSION']
+          out = pack_engine(Path('/tmp/engine-pack'), version=version)
+          print(f'Assembled engine-pack at {out}')
+          "
+
+      - name: Sign and publish engine-pack variants
+        env:
+          STITCH_SIGNING_KEY: ${{ secrets.STITCH_SIGNING_KEY }}
+          STITCH_PUBLISH_URL: ${{ secrets.STITCH_PUBLISH_URL }}
+          STITCH_ADMIN_KEY: ${{ secrets.STITCH_ADMIN_KEY }}
+          PACK_VERSION: ${{ steps.version.outputs.version }}
+          PACK_VARIANTS: ${{ steps.variants.outputs.count }}
+        run: |
+          if [ -z "$STITCH_SIGNING_KEY" ]; then
+            echo "publish skipped: signing secrets not configured"
+            exit 0
+          fi
+          if [ -z "$STITCH_PUBLISH_URL" ] || [ -z "$STITCH_ADMIN_KEY" ]; then
+            echo "publish skipped: STITCH_PUBLISH_URL or STITCH_ADMIN_KEY not configured"
+            exit 0
+          fi
+          # Write key to a temp file (mktemp creates 0600) and ensure it is
+          # wiped on exit — never leave the signing key on disk.
+          KEYFILE=$(mktemp)
+          export KEYFILE
+          printf '%s' "$STITCH_SIGNING_KEY" > "$KEYFILE"
+          trap 'rm -f "$KEYFILE"' EXIT
+          python -c "
+          import asyncio, os, shutil
+          from pathlib import Path
+          from autoreg.plugin import crypto
+          from stitch_plugin_tools.publish import publish_package
+          from stitch_plugin_tools.watermark import inject_watermark
+
+          async def main():
+              base = Path('/tmp/engine-pack')
+              key = Path(os.environ['KEYFILE']).read_bytes()
+              publish_url = os.environ['STITCH_PUBLISH_URL']
+              admin_key = os.environ['STITCH_ADMIN_KEY']
+              n = int(os.environ['PACK_VARIANTS'])
+              manifest = crypto.read_manifest(base)
+              plugin_id = manifest.id
+              version = manifest.version
+
+              # Probe whether the engine-pack carries a scenario.json with
+              # selector_candidates.  inject_watermark returns False when
+              # there is no scenario.json (engine-pack is a code module, not
+              # a scenario-carrying plugin) — in that case watermarking is
+              # vacuous and N identical variants would be published, so we
+              # publish only the legacy signed package.
+              probe_dir = Path('/tmp/engine-pack-probe')
+              if probe_dir.exists():
+                  shutil.rmtree(probe_dir)
+              shutil.copytree(base, probe_dir)
+              watermarked = inject_watermark(
+                  probe_dir,
+                  plugin_id=plugin_id,
+                  version=version,
+                  variant_idx=0,
+              )
+              shutil.rmtree(probe_dir)
+
+              if not watermarked:
+                  print(
+                      '::warning::engine-pack has no scenario.json — '
+                      'publishing single non-variant package '
+                      '(watermarking not applicable to code modules)'
+                  )
+                  legacy_dir = Path('/tmp/engine-pack-legacy')
+                  if legacy_dir.exists():
+                      shutil.rmtree(legacy_dir)
+                  shutil.copytree(base, legacy_dir)
+                  sig = crypto.sign_package(legacy_dir, key)
+                  crypto.write_signature(legacy_dir, sig)
+                  result = await publish_package(
+                      legacy_dir,
+                      server_url=publish_url,
+                      admin_key=admin_key,
+                      signing_key_pem=None,
+                      rollout_percent=100,
+                  )
+                  print(f'Published legacy (non-variant): {result}')
+                  return
+
+              for idx in range(n):
+                  variant_dir = Path(f'/tmp/engine-pack-v{idx}')
+                  if variant_dir.exists():
+                      shutil.rmtree(variant_dir)
+                  shutil.copytree(base, variant_dir)
+                  # Inject honeypot watermark into this variant.
+                  inject_watermark(
+                      variant_dir,
+                      plugin_id=plugin_id,
+                      version=version,
+                      variant_idx=idx,
+                  )
+                  # Sign the variant (updates plugin.json signature).
+                  sig = crypto.sign_package(variant_dir, key)
+                  crypto.write_signature(variant_dir, sig)
+                  # Publish as variant idx.
+                  result = await publish_package(
+                      variant_dir,
+                      server_url=publish_url,
+                      admin_key=admin_key,
+                      signing_key_pem=None,  # already signed above
+                      rollout_percent=100,
+                      variant_index=idx,
+                  )
+                  print(f'Published variant {idx}/{n}: {result}')
+              # Also publish a non-variant (legacy) copy for fallback.
+              legacy_dir = Path('/tmp/engine-pack-legacy')
+              if legacy_dir.exists():
+                  shutil.rmtree(legacy_dir)
+              shutil.copytree(base, legacy_dir)
+              sig = crypto.sign_package(legacy_dir, key)
+              crypto.write_signature(legacy_dir, sig)
+              result = await publish_package(
+                  legacy_dir,
+                  server_url=publish_url,
+                  admin_key=admin_key,
+                  signing_key_pem=None,
+                  rollout_percent=100,
+              )
+              print(f'Published legacy (non-variant): {result}')
+
+          asyncio.run(main())
+          "

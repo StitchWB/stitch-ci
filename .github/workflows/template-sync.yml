@@ -1,0 +1,56 @@
+name: Template sync check
+
+# Read-only drift check: regenerates the plugin template from the private
+# hub's scaffold (`python -m stitch_plugin_tools sync-template`) and fails if
+# the committed template/ has drifted from it.  Runs on this public repo's
+# free minutes; the hub's own Actions are disabled.  Manual dispatch only.
+
+on:
+  workflow_dispatch: {}
+
+concurrency:
+  group: template-sync-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sync-check:
+    name: Verify template/ is in sync with scaffold
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: StitchWB/Stitch-Account-Manager
+          token: ${{ secrets.MONOREPO_READ_TOKEN }}
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: python/requirements*.txt
+
+      - name: Install stitch_plugin_tools
+        run: pip install -e python/
+
+      - name: Regenerate template into temp dir
+        run: |
+          TMPDIR=$(mktemp -d)
+          echo "TMPDIR=$TMPDIR" >> "$GITHUB_ENV"
+          python -m stitch_plugin_tools sync-template --out "$TMPDIR/template"
+
+      - name: Diff regenerated vs committed template/
+        env:
+          TMPDIR: ${{ env.TMPDIR }}
+        run: |
+          set -euo pipefail
+          # Recursive diff ignoring .git directories. The committed
+          # template/ is the source of truth; if the regenerated output
+          # differs, the scaffold and the committed seed have drifted.
+          if ! diff -r --exclude=.git "$TMPDIR/template" template/ > /dev/null; then
+            echo "::error::template/ is out of sync — run: python -m stitch_plugin_tools sync-template"
+            echo ""
+            echo "Diff (regenerated vs committed):"
+            diff -r --exclude=.git "$TMPDIR/template" template/ || true
+            exit 1
+          fi
+          echo "template/ is in sync with the scaffold."

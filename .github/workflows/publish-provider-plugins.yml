@@ -1,0 +1,145 @@
+name: Publish provider plugins
+
+# Farm port of the hub's publish-provider-plugins.yml (hub Actions are
+# disabled; this public CI farm is the only CI/CD control plane). Checks the
+# hub out read-only, compiles each method provider plugin with Nuitka into a
+# platform-native extension (source never ships) and publishes one artifact
+# per (provider, OS). Manual button only.
+#
+# The client auto-detects its platform (plugin_platform_tag) and the server
+# serves the matching artifact — see GET /plugins/{id}/{version}?platform=….
+#
+# Platform tags MUST match autoreg.plugin.layout.plugin_platform_tag():
+#   windows-latest -> win_x86_64
+#   ubuntu-latest  -> linux_x86_64
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Plugin version (semver)"
+        required: false
+        default: ""
+
+concurrency:
+  group: provider-plugins-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Compile+publish ${{ matrix.provider }} (${{ matrix.platform }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        provider: [kiro, kiro_v2, windsurf, trae, fireworks, qoder, v0_app]
+        os: [windows-latest, ubuntu-latest]
+        include:
+          - os: windows-latest
+            platform: win_x86_64
+          - os: ubuntu-latest
+            platform: linux_x86_64
+      fail-fast: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: StitchWB/Stitch-Account-Manager
+          # Providers are git submodules; without recursive checkout their
+          # dirs are empty and pack_provider() fails.
+          token: ${{ secrets.MONOREPO_READ_TOKEN }}
+          submodules: recursive
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Nuitka needs a C backend compiler.  gcc is preinstalled on ubuntu;
+      # on windows activate the preinstalled MSVC toolchain (x64).
+      - name: Activate MSVC (Windows)
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Install dependencies
+        run: |
+          pip install -e python/
+          pip install httpx nuitka
+
+      - name: Leak check (grep-blocker)
+        run: python scripts/check_export_leaks.py
+
+      - name: Determine version
+        id: version
+        shell: python
+        run: |
+          import os, subprocess, datetime
+          inp = "${{ github.event.inputs.version }}".strip()
+          if inp:
+              version = inp
+          else:
+              sha = subprocess.check_output(
+                  ["git", "rev-parse", "--short", "HEAD"]
+              ).decode().strip()
+              now = datetime.date.today()
+              # No leading zeros (semver forbids them): int month/day.
+              version = f"{now.year}.{now.month}.{now.day}+{sha}"
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"version={version}\n")
+
+      - name: Assemble + compile provider plugin (Nuitka)
+        env:
+          PROVIDER_ID: ${{ matrix.provider }}
+          PACK_VERSION: ${{ steps.version.outputs.version }}
+        run: python scripts/compile_provider_plugin.py
+
+      - name: Sign and publish provider plugin
+        env:
+          STITCH_SIGNING_KEY: ${{ secrets.STITCH_SIGNING_KEY }}
+          STITCH_PUBLISH_URL: ${{ secrets.STITCH_PUBLISH_URL }}
+          STITCH_ADMIN_KEY: ${{ secrets.STITCH_ADMIN_KEY }}
+          PROVIDER_ID: ${{ matrix.provider }}
+          PLATFORM_TAG: ${{ matrix.platform }}
+          PACK_VERSION: ${{ steps.version.outputs.version }}
+        shell: python
+        run: |
+          import asyncio, os, sys, tempfile
+          from pathlib import Path
+
+          signing_key = os.environ.get("STITCH_SIGNING_KEY", "")
+          publish_url = os.environ.get("STITCH_PUBLISH_URL", "")
+          admin_key = os.environ.get("STITCH_ADMIN_KEY", "")
+          if not signing_key:
+              print("publish skipped: signing secrets not configured")
+              sys.exit(0)
+
+          sys.path.insert(0, str(Path("python")))
+          from autoreg.plugin import crypto
+          from stitch_plugin_tools.publish import publish_package
+
+          async def main():
+              provider_id = os.environ["PROVIDER_ID"]
+              platform = os.environ["PLATFORM_TAG"]
+              base = Path(tempfile.gettempdir()) / f"{provider_id}-provider"
+              key = signing_key.encode()
+
+              # Sign the compiled package (updates plugin.json signature in place).
+              sig = crypto.sign_package(base, key)
+              crypto.write_signature(base, sig)
+
+              if not publish_url or not admin_key:
+                  print(
+                      "::warning::STITCH_PUBLISH_URL/STITCH_ADMIN_KEY not set — "
+                      "signed but skipping publish"
+                  )
+                  return
+
+              result = await publish_package(
+                  base,
+                  server_url=publish_url,
+                  admin_key=admin_key,
+                  signing_key_pem=None,
+                  rollout_percent=100,
+                  platform=platform,
+              )
+              print(f"Published {provider_id} [{platform}]: {result}")
+
+          asyncio.run(main())

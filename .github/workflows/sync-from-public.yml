@@ -1,0 +1,94 @@
+name: Sync Zone-1 from public
+
+# Mirrors Zone-1 source FROM Stitch-Manager (public source of truth) INTO
+# the private hub (StitchWB/Stitch-Account-Manager) as a reviewable auto-PR,
+# so the full release build compiles against the latest client code.  Runs
+# on this public repo's free minutes; the hub's own Actions are disabled.
+# Triggered by the daily cron below or the manual "Run workflow" button.
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    # Daily at 04:17 UTC (off-peak minute to avoid scheduler contention).
+    - cron: '17 4 * * *'
+
+concurrency:
+  group: sync-from-public
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync:
+    name: Mirror Zone-1 public -> hub
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout hub
+        uses: actions/checkout@v4
+        with:
+          repository: StitchWB/Stitch-Account-Manager
+          token: ${{ secrets.MONOREPO_READ_TOKEN }}
+          fetch-depth: 0
+          # The auto-PR step re-auths origin with MONOREPO_WRITE_TOKEN.
+          persist-credentials: false
+
+      # Stitch-Manager is a different repo - GITHUB_TOKEN cannot read it, so
+      # use RELEASES_PAT (read access to the public repo).
+      - name: Checkout Stitch-Manager (public)
+        uses: actions/checkout@v4
+        with:
+          repository: StitchWB/Stitch-Manager
+          token: ${{ secrets.RELEASES_PAT }}
+          path: public-src
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Sync Zone-1 (public -> hub)
+        run: |
+          python scripts/sync_from_public.py \
+            --public public-src \
+            --hub . \
+            --apply
+          # Report-only deletions: do NOT auto-delete hub files absent from the
+          # public repo (that is a deliberate human decision).
+
+      - name: Detect changes
+        id: changes
+        run: |
+          # public-src is the checkout of the public repo inside this workdir —
+          # exclude it, else an embedded-repo hint always reads as "changed".
+          if [ -n "$(git status --porcelain -- . ':!public-src')" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Open auto-PR with the mirrored Zone-1
+        if: steps.changes.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.MONOREPO_WRITE_TOKEN }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "PR skipped: MONOREPO_WRITE_TOKEN not configured"
+            exit 0
+          fi
+          BRANCH="sync/zone1-from-public-$(date +%Y%m%d-%H%M%S)"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$BRANCH"
+          # public-src is the public-repo checkout inside this workdir; never
+          # stage it (would land as an embedded-repo gitlink).
+          git add -A -- . ':!public-src'
+          git commit -m "chore(sync): mirror Zone-1 from Stitch-Manager (automated public->hub sync)"
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/StitchWB/Stitch-Account-Manager.git"
+          git push -u origin "$BRANCH"
+          gh pr create \
+            --title "chore(sync): mirror Zone-1 from Stitch-Manager" \
+            --body "Automated Zone-1 mirror (public -> hub). Stitch-Manager is the source of truth for the client; this PR carries its latest Zone-1 into the hub for the full release build. Review and merge." \
+            --base master \
+            --head "$BRANCH"

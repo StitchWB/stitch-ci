@@ -1,9 +1,11 @@
 name: Poll monorepo
 
 # Orchestrator: the public farm cannot receive events from the private
-# monorepo, so this polls its HEAD + tags every 10 minutes and dispatches the
-# farm workflows whose path filters match the change set.  State (last seen
-# sha + tags) lives in state/monorepo.json in THIS repo.
+# monorepo, so this polls its HEAD, tags and open PRs every 10 minutes and
+# dispatches the farm workflows whose path filters match the change set.
+# PR heads get CI + mirror-guard as commit statuses on the head sha.
+# State (last seen sha + tags + dispatched PR heads) lives in
+# state/monorepo.json in THIS repo.
 
 on:
   schedule:
@@ -57,14 +59,17 @@ jobs:
           sha = json.loads(raw)["object"]["sha"]
           status, raw = api(f"https://api.github.com/repos/{MONO}/tags?per_page=100", read)
           tags = [t["name"] for t in json.loads(raw)]
+          status, raw = api(f"https://api.github.com/repos/{MONO}/pulls?state=open&per_page=100", read)
+          open_prs = json.loads(raw) if status == 200 else []
 
           status, raw = api(f"https://api.github.com/repos/{SELF}/contents/{STATE_PATH}", selftok)
-          old_sha, file_sha, old_tags = None, None, []
+          old_sha, file_sha, old_tags, old_prs = None, None, [], {}
           if status == 200:
               meta = json.loads(raw)
               file_sha = meta["sha"]
               state = json.loads(base64.b64decode(meta["content"]))
               old_sha, old_tags = state.get("sha"), state.get("tags", [])
+              old_prs = state.get("prs", {})
           new_tags = [t for t in tags if t not in old_tags]
 
           def dispatch(workflow, inputs=None):
@@ -100,11 +105,33 @@ jobs:
                   dispatch("export-services.yml")
               if hit("plugins-src/"):
                   dispatch("publish-service-plugins.yml")
+              if hit(("template/", "python/stitch_plugin_tools/")):
+                  dispatch("template-sync.yml")
+                  dispatch("push-template.yml")
+              if hit(("python/autoreg/plugin/engine-pack/", "python/autoreg/captcha/",
+                      "python/stitch_plugin_tools/publish.py", "vendor/turnstile-solver/")):
+                  dispatch("publish-engine-pack.yml")
               for tag in new_tags:
                   if tag.startswith("v"):
                       dispatch("release.yml", {"tag": tag})
+                      dispatch("release-public.yml", {"tag": tag})
 
-          body = json.dumps({"sha": sha, "tags": tags}, indent=2).encode()
+          # PR heads get the full CI contract + mirror guard as commit
+          # statuses on the head sha, so hub PRs show a real signal.
+          for pr in open_prs:
+              head_sha = pr["head"]["sha"]
+              if head_sha in old_prs:
+                  continue
+              dispatch("ci.yml", {
+                  "repo": MONO,
+                  "ref": head_sha,
+                  "pr_base": pr["base"]["sha"],
+                  "pr_number": str(pr["number"]),
+                  "pr_head": pr["head"]["ref"],
+              })
+          pr_state = {pr["head"]["sha"]: pr["number"] for pr in open_prs}
+
+          body = json.dumps({"sha": sha, "tags": tags, "prs": pr_state}, indent=2).encode()
           payload = {
               "message": f"chore(poll): monorepo state {sha[:8]}",
               "content": base64.b64encode(body).decode(),

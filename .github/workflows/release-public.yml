@@ -1,0 +1,236 @@
+name: Release (public open-core)
+
+# Farm port of the hub's release-public.yml (hub Actions are disabled; this
+# public CI farm is the only CI/CD control plane). The hub original fired on
+# v* tag pushes; the farm cannot receive hub events, so poll.yml dispatches
+# this workflow with the tag input when a new v* tag appears on the hub (or
+# use the manual button). Builds the open-core binary FROM the public
+# StitchWB/Stitch-Manager repo at that tag (no Nuitka, no vendor solver, no
+# Zone-2 methods — they are physically absent from that tree) and publishes
+# the release there with RELEASES_PAT. Matrix: windows + ubuntu, unchanged.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v0.1.83)"
+        required: true
+        type: string
+
+jobs:
+  build:
+    name: Build open-core (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            artifact_name: stitch-windows
+            asset_ext: .exe
+            pyinstaller_dist: stitch-backend.exe
+          - os: ubuntu-latest
+            artifact_name: stitch-linux
+            asset_ext: ''
+            pyinstaller_dist: stitch-backend
+
+    steps:
+      # Build FROM the public repo (Zone-1 source of truth), not from a
+      # monorepo export — external PRs merged there must reach the binary.
+      - name: Checkout Stitch-Manager (public Zone-1 source)
+        uses: actions/checkout@v4
+        with:
+          repository: StitchWB/Stitch-Manager
+          token: ${{ secrets.RELEASES_PAT }}
+          ref: ${{ inputs.tag }}
+          path: public
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: public/package-lock.json
+
+      - name: Sync version with git tag
+        shell: bash
+        working-directory: public
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          VERSION=${TAG#v}
+          echo "Building open-core version $VERSION"
+          npm version "$VERSION" --no-git-tag-version --allow-same-version || true
+          python scripts/generate_version.py "$VERSION"
+
+      - name: Install frontend dependencies
+        working-directory: public
+        run: npm ci
+
+      - name: Build frontend
+        working-directory: public
+        run: npm run build
+
+      - name: Install Python dependencies
+        working-directory: public/python
+        run: |
+          pip install -e ".[dev]"
+          pip install pyinstaller
+
+      # No Nuitka — open-core source is public by design.
+      # The spec falls back to raw autoreg/*.py sources as datas when
+      # autoreg_compiled/ is absent (which it is in the public tree).
+      - name: Build standalone executable (PyInstaller, no Nuitka)
+        working-directory: public/python
+        shell: bash
+        run: pyinstaller stitch-backend.spec --distpath dist --noconfirm
+
+      # ── Windows: NSIS installer + portable zip ──
+      # Order matters: installer.nsi (line ~45) does File "python\dist\stitch-backend.exe"
+      # and the portable zip does `cp python/dist/stitch-backend.exe` — both read the
+      # PyInstaller output BEFORE the rename step moves it to the artifact name.
+      # Rename must run LAST (after NSIS + zip), then uploads consume the env vars.
+      - name: Install NSIS (Windows)
+        if: runner.os == 'Windows'
+        run: choco install nsis -y --no-progress
+
+      - name: Build NSIS installer (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        working-directory: public
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          VERSION=${TAG#v}
+          # choco installs NSIS but does not refresh PATH for the current
+          # shell — probe both the canonical install path and PATH.
+          MAKENSIS="C:/Program Files (x86)/NSIS/makensis.exe"
+          if [ ! -x "$MAKENSIS" ]; then
+            MAKENSIS="C:/Program Files/NSIS/makensis.exe"
+          fi
+          if [ ! -x "$MAKENSIS" ]; then
+            MAKENSIS="$(command -v makensis || true)"
+          fi
+          if [ -z "$MAKENSIS" ] || [ ! -x "$MAKENSIS" ]; then
+            echo "ERROR: makensis not found after choco install" >&2
+            exit 1
+          fi
+          "$MAKENSIS" //DVERSION=$VERSION installer.nsi
+          echo "INSTALLER_PATH=stitch-setup-${VERSION}.exe" >> $GITHUB_ENV
+
+      - name: Create portable zip (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        working-directory: public
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          VERSION=${TAG#v}
+          mkdir -p portable/StitchManager
+          cp python/dist/stitch-backend.exe portable/StitchManager/
+          cp resources/icons/app-icon.ico portable/StitchManager/ || true
+          cd portable && zip -r ../stitch-portable-${VERSION}.zip StitchManager && cd ..
+          echo "PORTABLE_PATH=stitch-portable-${VERSION}.zip" >> $GITHUB_ENV
+
+      - name: Rename portable artifact
+        shell: bash
+        working-directory: public
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          VERSION=${TAG#v}
+          SRC="python/dist/${{ matrix.pyinstaller_dist }}"
+          DST="${{ matrix.artifact_name }}-${VERSION}${{ matrix.asset_ext }}"
+          mv "$SRC" "$DST"
+          echo "ARTIFACT_PATH=$DST" >> $GITHUB_ENV
+          echo "ARTIFACT_NAME=$DST" >> $GITHUB_ENV
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: public/${{ env.ARTIFACT_PATH }}
+
+      - name: Upload installer (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: stitch-setup
+          path: public/${{ env.INSTALLER_PATH }}
+
+      - name: Upload portable zip (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: stitch-portable
+          path: public/${{ env.PORTABLE_PATH }}
+
+  publish:
+    name: Publish to Stitch-Manager (public)
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+
+      - name: List artifacts
+        run: find artifacts/ -type f
+
+      - name: Create release in Stitch-Manager (public)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.RELEASES_PAT }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          VERSION=${TAG#v}
+
+          FILES=$(find artifacts/ -type f | tr '\n' ' ')
+
+          # Release notes: download table + verifiable checksums + install.
+          # --generate-notes appends an auto changelog ("What's Changed").
+          {
+            echo "## Stitch Manager $TAG (open-core)"
+            echo
+            echo "### Download"
+            echo
+            echo "| Platform | File | Type |"
+            echo "|----------|------|------|"
+            echo "| Windows  | \`stitch-setup-${VERSION}.exe\` | Installer (recommended) |"
+            echo "| Windows  | \`stitch-portable-${VERSION}.zip\` | Portable |"
+            echo "| Linux    | \`stitch-linux-${VERSION}\` | Standalone binary |"
+            echo
+            echo "### SHA-256 checksums"
+            echo
+            echo '```'
+            for f in $(find artifacts/ -type f | sort); do
+              (cd "$(dirname "$f")" && sha256sum "$(basename "$f")")
+            done
+            echo '```'
+            echo
+            echo "### Install"
+            echo
+            echo "**Windows (installer):** Run \`stitch-setup-${VERSION}.exe\` — installs to Programs, creates Start Menu + Desktop shortcuts."
+            echo
+            echo "**Windows (portable):** Extract zip anywhere, run \`stitch-backend.exe\`."
+            echo
+            echo "**Linux:**"
+            echo '```bash'
+            echo "chmod +x stitch-linux-${VERSION}"
+            echo "./stitch-linux-${VERSION}"
+            echo '```'
+          } > notes.md
+
+          gh release create "$TAG" \
+            --repo StitchWB/Stitch-Manager \
+            --title "Stitch Manager $TAG" \
+            --notes-file notes.md \
+            --generate-notes \
+            $FILES

@@ -1,0 +1,59 @@
+name: Push template to public repo
+
+# Pushes the canonical plugin template to the public StitchWB/stitch-plugin-template
+# repo.  The pushed content is regenerated from the scaffold (never pushed
+# as-committed), so the public repo can never drift from what
+# `stitch_plugin_tools sync-template` produces.  Runs on this public repo's
+# free minutes; the hub's own Actions are disabled.  Manual dispatch only —
+# path-based triggering off hub pushes is poll.yml's job.
+
+on:
+  workflow_dispatch: {}
+
+concurrency:
+  group: push-template
+  cancel-in-progress: false
+
+jobs:
+  push:
+    name: Regenerate and push template repo
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: StitchWB/Stitch-Account-Manager
+          token: ${{ secrets.MONOREPO_READ_TOKEN }}
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: python/requirements*.txt
+
+      - name: Install stitch_plugin_tools
+        run: pip install -e python/
+
+      - name: Regenerate template from scaffold
+        run: python -m stitch_plugin_tools sync-template --out "$RUNNER_TEMP/template"
+
+      - name: Push to StitchWB/stitch-plugin-template
+        env:
+          SERVICE_EXPORT_TOKEN: ${{ secrets.SERVICE_EXPORT_TOKEN }}
+        run: |
+          if [ -z "$SERVICE_EXPORT_TOKEN" ]; then
+            echo "push skipped: SERVICE_EXPORT_TOKEN not configured"
+            exit 0
+          fi
+          git clone --depth 1 "https://x-access-token:${SERVICE_EXPORT_TOKEN}@github.com/StitchWB/stitch-plugin-template.git" "$RUNNER_TEMP/repo"
+          rsync -a --delete --exclude .git "$RUNNER_TEMP/template/" "$RUNNER_TEMP/repo/"
+          cd "$RUNNER_TEMP/repo"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "template repo already up to date"
+            exit 0
+          fi
+          git -c user.name="github-actions[bot]" \
+              -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+              commit -m "chore: sync template from hub (scaffold regeneration)"
+          git push

@@ -18,6 +18,26 @@ on:
           - all
           - StitchWB/Stitch-Account-Manager
           - WhiteBite/AIApiRadar
+      ref:
+        description: "SHA/branch to test (empty = default branch; poll passes PR head shas)"
+        type: string
+        required: false
+        default: ""
+      pr_base:
+        description: "PR base sha — enables the guard-mirrors job"
+        type: string
+        required: false
+        default: ""
+      pr_number:
+        description: "PR number (status context only)"
+        type: string
+        required: false
+        default: ""
+      pr_head:
+        description: "PR head branch name (sync/* branches skip the mirror guard)"
+        type: string
+        required: false
+        default: ""
   schedule:
     - cron: "17 3 * * *"
 
@@ -54,6 +74,7 @@ jobs:
           repository: ${{ matrix.repo }}
           token: ${{ secrets.MONOREPO_READ_TOKEN }}
           submodules: recursive
+          ref: ${{ github.event.inputs.ref }}
 
       - name: Resolve tested sha
         if: steps.gate.outputs.run == 'true'
@@ -138,6 +159,7 @@ jobs:
           repository: StitchWB/Stitch-Account-Manager
           token: ${{ secrets.MONOREPO_READ_TOKEN }}
           submodules: recursive
+          ref: ${{ github.event.inputs.ref }}
 
       - name: Resolve tested sha
         if: steps.gate.outputs.run == 'true'
@@ -195,3 +217,63 @@ jobs:
             -H "Accept: application/vnd.github+json" \
             -d "{\"state\":\"$STATE\",\"context\":\"stitch-ci/frontend\",\"target_url\":\"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}" \
             "https://api.github.com/repos/StitchWB/Stitch-Account-Manager/statuses/${{ steps.mono_sha.outputs.sha }}" || true
+
+  guard-mirrors:
+    # plugins-src/ is a mirror of the public stitch-* plugin repos, regenerated
+    # by sync-service-plugins.yml (branches sync/*).  Direct commits there are
+    # destroyed by the next sync — fail such PRs before they merge.  Runs only
+    # when poll dispatches CI for a PR head (pr_base input set).
+    name: "Guard mirrored paths: StitchWB/Stitch-Account-Manager"
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.pr_base != '' }}
+    steps:
+      - name: Checkout monorepo PR head (read-only)
+        uses: actions/checkout@v4
+        with:
+          repository: StitchWB/Stitch-Account-Manager
+          token: ${{ secrets.MONOREPO_READ_TOKEN }}
+          submodules: recursive
+          ref: ${{ github.event.inputs.ref }}
+          fetch-depth: 0
+
+      - name: Report pending status
+        env:
+          READ_TOKEN: ${{ secrets.MONOREPO_READ_TOKEN }}
+        run: |
+          curl -sf -X POST \
+            -H "Authorization: Bearer $READ_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -d '{"state":"pending","context":"stitch-ci/guard-mirrors","target_url":"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"}' \
+            "https://api.github.com/repos/StitchWB/Stitch-Account-Manager/statuses/${{ github.event.inputs.ref }}" || true
+
+      - name: Check plugins-src/ is untouched
+        env:
+          PR_BASE: ${{ github.event.inputs.pr_base }}
+          PR_HEAD: ${{ github.event.inputs.pr_head }}
+        run: |
+          case "$PR_HEAD" in
+            sync/*) echo "sync branch — mirror update is the job"; exit 0 ;;
+          esac
+          changed=$(git diff --name-only "$PR_BASE...HEAD" -- plugins-src/)
+          if [ -n "$changed" ]; then
+            echo "::error::plugins-src/ is a mirror of the public stitch-* plugin repos."
+            echo "::error::Commit to the public plugin repo instead; the hub gets it via sync-service-plugins.yml."
+            echo "Offending files:"
+            echo "$changed"
+            exit 1
+          fi
+          echo "OK: no mirrored paths touched"
+
+      - name: Report final status
+        if: always()
+        env:
+          READ_TOKEN: ${{ secrets.MONOREPO_READ_TOKEN }}
+          JOB_STATE: ${{ job.status }}
+        run: |
+          STATE=success
+          [ "$JOB_STATE" = "success" ] || STATE=failure
+          curl -sf -X POST \
+            -H "Authorization: Bearer $READ_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -d "{\"state\":\"$STATE\",\"context\":\"stitch-ci/guard-mirrors\",\"target_url\":\"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}" \
+            "https://api.github.com/repos/StitchWB/Stitch-Account-Manager/statuses/${{ github.event.inputs.ref }}" || true

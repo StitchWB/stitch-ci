@@ -1,0 +1,100 @@
+name: Auto Release
+
+# Farm port of the hub's auto-release.yml (hub Actions are disabled; this
+# public CI farm is the only CI/CD control plane). Release = create a
+# version tag ON THE HUB. Tag creation is DELIBERATE (manual button), NOT
+# automatic on every push. poll.yml notices the new hub tag and dispatches
+# release.yml + release-public.yml to build and publish the artifacts.
+# Pushing the tag needs MONOREPO_WRITE_TOKEN; skips cleanly while unset.
+#
+# Cut a release:
+#   gh workflow run auto-release.yml                   # auto-bump patch
+#   gh workflow run auto-release.yml -f version=1.2.0  # explicit version
+# (or Actions → Auto Release → Run workflow)
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release (e.g. 1.2.3). Empty = auto-bump patch.'
+        required: false
+        default: ''
+
+concurrency:
+  group: auto-release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tag-and-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          repository: StitchWB/Stitch-Account-Manager
+          token: ${{ secrets.MONOREPO_READ_TOKEN }}
+          # The read token must not linger in the git config: the tag push
+          # authenticates with MONOREPO_WRITE_TOKEN instead.
+          persist-credentials: false
+          fetch-depth: 0  # Need full history for tag detection
+
+      - name: Determine next version
+        id: version
+        run: |
+          # Explicit version from the workflow_dispatch input wins over auto-bump.
+          INPUT_VERSION="${{ github.event.inputs.version }}"
+          if [ -n "$INPUT_VERSION" ]; then
+            NEXT_VERSION="${INPUT_VERSION#v}"
+            echo "version=$NEXT_VERSION" >> $GITHUB_OUTPUT
+            echo "tag=v$NEXT_VERSION" >> $GITHUB_OUTPUT
+            echo "Next version (manual): $NEXT_VERSION"
+            exit 0
+          fi
+
+          # Get the latest version tag (e.g. v1.0.42)
+          LATEST_TAG=$(git tag -l 'v*' --sort=-v:refname | head -n1)
+
+          if [ -z "$LATEST_TAG" ]; then
+            # No tags yet — start at 1.0.0
+            NEXT_VERSION="1.0.0"
+          else
+            # Strip 'v' prefix
+            CURRENT="${LATEST_TAG#v}"
+
+            # Split into major.minor.patch
+            MAJOR=$(echo "$CURRENT" | cut -d. -f1)
+            MINOR=$(echo "$CURRENT" | cut -d. -f2)
+            PATCH=$(echo "$CURRENT" | cut -d. -f3)
+
+            # Increment patch
+            PATCH=$((PATCH + 1))
+            NEXT_VERSION="${MAJOR}.${MINOR}.${PATCH}"
+          fi
+
+          echo "version=$NEXT_VERSION" >> $GITHUB_OUTPUT
+          echo "tag=v$NEXT_VERSION" >> $GITHUB_OUTPUT
+          echo "Next version: $NEXT_VERSION"
+
+      - name: Check if tag already exists
+        id: check
+        run: |
+          if git rev-parse "${{ steps.version.outputs.tag }}" >/dev/null 2>&1; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create and push tag
+        if: steps.check.outputs.exists == 'false'
+        run: |
+          if [ -z "$MONOREPO_WRITE_TOKEN" ]; then
+            echo "release skipped: MONOREPO_WRITE_TOKEN not configured"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "${{ steps.version.outputs.tag }}" -m "Release ${{ steps.version.outputs.tag }}"
+          git push "https://x-access-token:${MONOREPO_WRITE_TOKEN}@github.com/StitchWB/Stitch-Account-Manager.git" "${{ steps.version.outputs.tag }}"
+        env:
+          MONOREPO_WRITE_TOKEN: ${{ secrets.MONOREPO_WRITE_TOKEN }}

@@ -1,0 +1,102 @@
+name: Publish compiled provider plugins
+
+# Farm port of the hub's publish-compiled-plugins.yml (hub Actions are
+# disabled; this public CI farm is the only CI/CD control plane). Consumes
+# the ENCRYPTED compiled plugins produced by the PUBLIC stitch-build repo
+# and publishes them to the distribution server. Manual button only, run
+# AFTER the stitch-build build for the same version completes.
+#
+# Flow per (provider, platform):
+#   download <stitch-build release asset>.zip.enc (public URL, no auth needed)
+#   -> decrypt with ARTIFACT_PRIVATE_KEY (this farm's secret)
+#   -> sign with STITCH_SIGNING_KEY
+#   -> publish to the server with STITCH_ADMIN_KEY
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version built by stitch-build (release tag plugins-<version>)"
+        required: true
+
+concurrency:
+  group: publish-compiled-plugins
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish ${{ matrix.provider }} (${{ matrix.platform }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        provider: [kiro, kiro_v2, windsurf, trae, fireworks, qoder, v0_app]
+        platform: [win_x86_64, linux_x86_64]
+      fail-fast: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: StitchWB/Stitch-Account-Manager
+          token: ${{ secrets.MONOREPO_READ_TOKEN }}
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          pip install -e python/
+          pip install httpx
+
+      - name: Leak check (grep-blocker)
+        run: python scripts/check_export_leaks.py
+
+      - name: Secrets gate
+        id: gate
+        env:
+          ARTIFACT_PRIVATE_KEY: ${{ secrets.ARTIFACT_PRIVATE_KEY }}
+        run: |
+          if [ -z "$ARTIFACT_PRIVATE_KEY" ]; then
+            echo "publish skipped: ARTIFACT_PRIVATE_KEY not configured"
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Download encrypted asset from stitch-build
+        if: steps.gate.outputs.run == 'true'
+        env:
+          VERSION: ${{ github.event.inputs.version }}
+          PROVIDER: ${{ matrix.provider }}
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          url="https://github.com/StitchWB/stitch-build/releases/download/plugins-${VERSION}/${PROVIDER}-${PLATFORM}.zip.enc"
+          echo "Fetching $url"
+          curl -fL --retry 3 --retry-delay 5 -o pkg.zip.enc "$url"
+
+      - name: Decrypt artifact
+        if: steps.gate.outputs.run == 'true'
+        env:
+          ARTIFACT_PRIVATE_KEY: ${{ secrets.ARTIFACT_PRIVATE_KEY }}
+        run: |
+          KEYFILE=$(mktemp); printf '%s' "$ARTIFACT_PRIVATE_KEY" > "$KEYFILE"
+          trap 'rm -f "$KEYFILE"' EXIT
+          python -m stitch_plugin_tools.artifact_crypto decrypt \
+            --privkey "$KEYFILE" --in pkg.zip.enc --out pkg.zip
+
+      - name: Sign and publish
+        if: steps.gate.outputs.run == 'true'
+        env:
+          STITCH_SIGNING_KEY: ${{ secrets.STITCH_SIGNING_KEY }}
+          STITCH_PUBLISH_URL: ${{ secrets.STITCH_PUBLISH_URL }}
+          STITCH_ADMIN_KEY: ${{ secrets.STITCH_ADMIN_KEY }}
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          if [ -z "$STITCH_SIGNING_KEY" ]; then
+            echo "publish skipped: signing secrets not configured"
+            exit 0
+          fi
+          KEYFILE=$(mktemp); printf '%s' "$STITCH_SIGNING_KEY" > "$KEYFILE"
+          trap 'rm -f "$KEYFILE"' EXIT
+          python scripts/publish_decrypted_plugin.py \
+            --zip pkg.zip --platform "$PLATFORM" --key-file "$KEYFILE"

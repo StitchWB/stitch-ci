@@ -1,0 +1,86 @@
+name: HoloNe rules sync
+
+# Farm port of the hub's holone-rules-sync.yml (hub Actions are disabled;
+# this public CI farm is the only CI/CD control plane). Runs on the hub
+# checkout (read-only) weekly Monday 05:23 UTC or via the manual button;
+# opening the refresh PR on the hub needs MONOREPO_WRITE_TOKEN (skips
+# cleanly while unset).
+#
+# The converter self-gates: it downloads the latest upstream tarball,
+# regenerates rules_atr.json / rules_atr_extended.json, replays every ATR
+# true-positive through the real gated engine, and aborts without writing
+# anything if any probe is missed. A PR is opened only when the update
+# changed rule content.
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Weekly, Monday 05:23 UTC (off-peak minute to avoid scheduler contention).
+    - cron: '23 5 * * 1'
+
+concurrency:
+  group: holone-rules-sync
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync:
+    name: Update ATR rules (self-gated)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          repository: StitchWB/Stitch-Account-Manager
+          token: ${{ secrets.MONOREPO_READ_TOKEN }}
+          # The read token must not linger in the git config: the branch push
+          # authenticates with MONOREPO_WRITE_TOKEN instead.
+          persist-credentials: false
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Update ATR rules
+        run: python scripts/import_atr_rules.py --update
+
+      - name: Detect changes
+        id: changes
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run holone tests
+        if: steps.changes.outputs.changed == 'true'
+        run: |
+          pip install -e ".[dev]"
+          python -m pytest python/tests/test_holone_gaps.py python/tests/test_holone_phase2.py python/tests/test_holone_vectors.py python/tests/test_holone_events.py python/tests/test_holone_parity.py -q --timeout=300
+
+      - name: Open auto-PR with the refreshed rules
+        if: steps.changes.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.MONOREPO_WRITE_TOKEN }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "sync skipped: MONOREPO_WRITE_TOKEN not configured"
+            exit 0
+          fi
+          BRANCH="sync/holone-rules-$(date +%Y%m%d-%H%M%S)"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$BRANCH"
+          git add -A
+          git commit -m "chore(security): refresh ATR holone rules (automated upstream sync)"
+          git push -u "https://x-access-token:${GH_TOKEN}@github.com/StitchWB/Stitch-Account-Manager.git" "$BRANCH"
+          gh pr create \
+            --title "chore(security): refresh ATR holone rules" \
+            --body "Automated Agent-Threat-Rule refresh via scripts/import_atr_rules.py --update. The converter replayed every upstream true-positive through the gated engine before writing (parity gate). HoloNe test suite is green on this branch. Review the rule diff and merge." \
+            --base master \
+            --head "$BRANCH"
