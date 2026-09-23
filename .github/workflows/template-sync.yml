@@ -43,6 +43,10 @@ jobs:
           TMPDIR: ${{ env.TMPDIR }}
         run: |
           set -euo pipefail
+          # scaffold embeds date.today() in plugin.json; normalize both sides or the check is red daily
+          normalize() { sed -E -i 's/"date": "[0-9]{4}-[0-9]{2}-[0-9]{2}"/"date": "NORMALIZED"/' "$1/plugin.json"; }
+          normalize "$TMPDIR/template"
+          normalize template
           # Recursive diff ignoring .git directories. The committed
           # template/ is the source of truth; if the regenerated output
           # differs, the scaffold and the committed seed have drifted.
