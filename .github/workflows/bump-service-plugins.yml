@@ -1,0 +1,73 @@
+name: Bump service plugin submodules
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    - cron: '37 4 * * *' # daily, staggered from sync-from-public
+
+concurrency:
+  group: bump-service-plugins
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  bump:
+    name: Bump plugins-src submodules to remote tips
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout hub (with submodules)
+        uses: actions/checkout@v4
+        with:
+          repository: StitchWB/Stitch-Account-Manager
+          token: ${{ secrets.MONOREPO_READ_TOKEN }}
+          fetch-depth: 0
+          submodules: recursive
+          persist-credentials: false # auto-PR re-auths with MONOREPO_WRITE_TOKEN
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # insteadOf auths the private freemodel submodule fetch
+      - name: Bump service plugin submodules
+        env:
+          TOKEN: ${{ secrets.MONOREPO_READ_TOKEN }}
+        run: |
+          git config --global url."https://x-access-token:${TOKEN}@github.com/".insteadOf "https://github.com/"
+          python scripts/bump_service_plugins.py
+
+      - name: Detect changes
+        id: changes
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Open auto-PR with the bumped gitlinks
+        if: steps.changes.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.MONOREPO_WRITE_TOKEN }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "PR skipped: MONOREPO_WRITE_TOKEN not configured"
+            exit 0
+          fi
+          BRANCH="sync/service-plugins-bump-$(date +%Y%m%d-%H%M%S)"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$BRANCH"
+          git add -A
+          git commit -m "chore(plugins): bump service plugin submodules to remote tips (automated)"
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/StitchWB/Stitch-Account-Manager.git"
+          git push -u origin "$BRANCH"
+          gh pr create \
+            --title "chore(plugins): bump service plugin submodules" \
+            --body "Automated submodule bump: plugins-src/ service plugins advanced to their remote default tips. The public repos (StitchWB/stitch-*) are the source of truth; review and merge to pick up plugin changes into the hub's tests and the sign/publish pipeline." \
+            --base master \
+            --head "$BRANCH"
