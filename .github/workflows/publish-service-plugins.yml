@@ -34,6 +34,7 @@ jobs:
         with:
           repository: StitchWB/Stitch-Account-Manager
           token: ${{ secrets.MONOREPO_READ_TOKEN }}
+          submodules: recursive
 
       - name: Resolve tested sha
         id: mono_sha
