@@ -81,26 +81,19 @@ jobs:
           PLUGIN_NAME: stitch-${{ matrix.plugin }}
           PACK_VERSION: ${{ steps.version.outputs.version }}
         run: |
+          python -m stitch_plugin_tools pack-service "plugins-src/$PLUGIN_NAME" "/tmp/$PLUGIN_NAME"
           python - <<'PYEOF'
-          import json, os, shutil
+          import json, os
           from pathlib import Path
           name = os.environ['PLUGIN_NAME']
           version = os.environ['PACK_VERSION']
-          src = Path(f'plugins-src/{name}')
-          dst = Path(f'/tmp/{name}')
-          if dst.exists():
-              shutil.rmtree(dst)
-          shutil.copytree(
-              src, dst,
-              ignore=shutil.ignore_patterns('__pycache__', '*.pyc'),
-          )
-          manifest_path = dst / 'plugin.json'
+          manifest_path = Path(f'/tmp/{name}') / 'plugin.json'
           manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
           if manifest.get('version') != version:
               manifest['version'] = version
               manifest_path.write_text(
                   json.dumps(manifest, indent=2) + '\n', encoding='utf-8')
-          print(f'Assembled {name} service plugin at {dst} (version {version})')
+          print(f'Assembled {name} service plugin at /tmp/{name} (version {version})')
           PYEOF
 
       - name: Assert staged version matches PACK_VERSION
