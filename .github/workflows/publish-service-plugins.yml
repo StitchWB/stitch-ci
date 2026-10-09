@@ -1,6 +1,6 @@
 name: Publish service plugins
 
-# Publishes the 9 official service plugins as signed packages from the
+# Publishes the official service plugins as signed packages from the
 # private monorepo, on this public repo's free minutes.  Port of the
 # monorepo's publish-service-plugins.yml (same steps, same secrets).
 
@@ -27,7 +27,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        plugin: [antigravity, bridges, cards, devbox, freemodel, mail, notebooklm, opencode, radar, sheets, totp]
+        plugin: [antigravity, bridges, cards, devbox, freemodel, mail, notebooklm, opencode, radar, relaycheck, sheets, totp]
       fail-fast: false
     steps:
       - uses: actions/checkout@v4
