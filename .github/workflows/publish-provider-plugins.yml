@@ -31,7 +31,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        provider: [kiro, kiro_v2, windsurf, trae, fireworks, qoder, v0_app, dahl, vani, abliteration, codebuff, notion, kauz, intern, apodex, moda, outlook, logicc, tokenharbor, remalt]
+        provider: [kiro, kiro_v2, windsurf, trae, fireworks, qoder, v0_app, dahl, vani, abliteration, codebuff, notion, kauz, intern, apodex, moda, outlook, logicc, tokenharbor, remalt, grok, mlh, jev, octopusx, type, leonardo, newapi_panels, beatapi]
         os: [windows-latest, ubuntu-latest]
         include:
           - os: windows-latest
