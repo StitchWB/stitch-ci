@@ -2,16 +2,15 @@ name: Publish engine-pack
 
 # Farm port of the hub's publish-engine-pack.yml (hub Actions are disabled;
 # this public CI farm is the only CI/CD control plane). Checks the hub out
-# read-only. The farm cannot receive hub push events, so runs start from
-# the manual button or a poll.yml dispatch when engine-pack paths change.
+# read-only. Manual dispatch only, version pinned to the manifest semver,
+# since an unpinned dispatch creates a NEW server version instead of upserting.
 
 on:
   workflow_dispatch:
     inputs:
       version:
         description: "Engine-pack version (semver)"
-        required: false
-        default: ""
+        required: true
       variants:
         description: "Number of watermarked variants to publish (default 8)"
         required: false
@@ -50,11 +49,8 @@ jobs:
           if [ -n "${{ github.event.inputs.version }}" ]; then
             echo "version=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
           else
-            # Date + short git SHA avoids collisions when multiple publishes
-            # land on the same day.  %-m/%-d strip leading zeros (semver
-            # forbids them, e.g. "08" is invalid).  GNU date on ubuntu-latest.
-            SHORT_SHA=$(git rev-parse --short HEAD)
-            echo "version=$(date +%Y.%-m.%-d)+${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+            echo "version input is required (pin the manifest semver); CalVer fallback removed" >&2
+            exit 1
           fi
 
       - name: Determine variant count

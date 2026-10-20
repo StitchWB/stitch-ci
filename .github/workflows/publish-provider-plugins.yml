@@ -18,8 +18,7 @@ on:
     inputs:
       version:
         description: "Plugin version (semver)"
-        required: false
-        default: ""
+        required: true
 
 concurrency:
   group: provider-plugins-publish
@@ -71,19 +70,15 @@ jobs:
         id: version
         shell: python
         run: |
-          import os, subprocess, datetime
+          import os, sys
           inp = "${{ github.event.inputs.version }}".strip()
-          if inp:
-              version = inp
-          else:
-              sha = subprocess.check_output(
-                  ["git", "rev-parse", "--short", "HEAD"]
-              ).decode().strip()
-              now = datetime.date.today()
-              # No leading zeros (semver forbids them): int month/day.
-              version = f"{now.year}.{now.month}.{now.day}+{sha}"
+          if not inp:
+              sys.exit(
+                  "version input is required (pin the manifest semver); "
+                  "CalVer fallback removed"
+              )
           with open(os.environ["GITHUB_OUTPUT"], "a") as f:
-              f.write(f"version={version}\n")
+              f.write(f"version={inp}\n")
 
       - name: Assemble + compile provider plugin (Nuitka)
         env:

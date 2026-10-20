@@ -108,9 +108,6 @@ jobs:
               if hit(("template/", "python/stitch_plugin_tools/")):
                   dispatch("template-sync.yml")
                   dispatch("push-template.yml")
-              if hit(("python/autoreg/plugin/engine-pack/", "python/autoreg/captcha/",
-                      "python/stitch_plugin_tools/publish.py", "vendor/turnstile-solver/")):
-                  dispatch("publish-engine-pack.yml")
               for tag in new_tags:
                   if tag.startswith("v"):
                       dispatch("release.yml", {"tag": tag})
