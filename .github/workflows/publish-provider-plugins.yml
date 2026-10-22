@@ -25,7 +25,61 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  matrix-drift-gate:
+    name: Provider matrix drift gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout hub plugin manifests
+        uses: actions/checkout@v4
+        with:
+          repository: StitchWB/Stitch-Account-Manager
+          token: ${{ secrets.MONOREPO_READ_TOKEN }}
+          path: hub
+
+      - name: Compare matrix providers to hub plugin manifests
+        shell: python
+        run: |
+          import re
+          import sys
+          from pathlib import Path
+
+          text = Path(".github/workflows/publish-provider-plugins.yml").read_text()
+          m = re.search(r"^\s*provider:\s*\[([^\]]*)\]", text, re.MULTILINE)
+          if not m:
+              print("::error::cannot locate the provider matrix list in this workflow")
+              sys.exit(1)
+          matrix_set = {p.strip() for p in m.group(1).split(",") if p.strip()}
+
+          plugin_root = Path("hub/python/autoreg/plugin")
+          hub_set = {
+              d.name[: -len("-autoreg")].replace("-", "_")
+              for d in plugin_root.glob("*-autoreg")
+              if d.name != "github-autoreg" and (d / "plugin.json").is_file()
+          }
+
+          missing_in_matrix = sorted(hub_set - matrix_set)
+          missing_in_hub = sorted(matrix_set - hub_set)
+          if missing_in_matrix or missing_in_hub:
+              if missing_in_matrix:
+                  print(
+                      "::error::hub providers missing from the matrix: "
+                      + ", ".join(missing_in_matrix)
+                  )
+              if missing_in_hub:
+                  print(
+                      "::error::matrix entries without a hub plugin dir: "
+                      + ", ".join(missing_in_hub)
+                  )
+              sys.exit(1)
+          print(
+              f"matrix drift gate: {len(matrix_set)} providers match "
+              "hub python/autoreg/plugin/*-autoreg manifests"
+          )
+
   publish:
+    needs: matrix-drift-gate
     name: Compile+publish ${{ matrix.provider }} (${{ matrix.platform }})
     runs-on: ${{ matrix.os }}
     strategy:
