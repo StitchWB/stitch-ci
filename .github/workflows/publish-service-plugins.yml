@@ -27,7 +27,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        plugin: [antigravity, bridges, cards, devbox, domains, freemodel, leonardo, mail, notebooklm, opencode, radar, relaycheck, sheets, totp, velly]
+        plugin: [antigravity, bridges, cards, devbox, domains, freemodel, leonardo, mail, notebooklm, opencode, radar, relaycheck, sheets, totp]
       fail-fast: false
     steps:
       - uses: actions/checkout@v4
