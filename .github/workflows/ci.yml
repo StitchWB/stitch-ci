@@ -124,6 +124,11 @@ jobs:
         working-directory: ${{ steps.ci.outputs.workdir }}
         run: ${{ steps.ci.outputs.test }}
 
+      - name: Vendor-drift check
+        if: steps.gate.outputs.run == 'true' && matrix.repo == 'StitchWB/Stitch-Account-Manager'
+        working-directory: python
+        run: python scripts/check_vendor_drift.py
+
       - name: Report final status
         if: always() && steps.gate.outputs.run == 'true' && matrix.repo == 'StitchWB/Stitch-Account-Manager'
         env:
