@@ -50,6 +50,22 @@ jobs:
             -d '{"state":"pending","context":"stitch-ci/plugins/${{ matrix.plugin }}","target_url":"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"}' \
             "https://api.github.com/repos/StitchWB/Stitch-Account-Manager/statuses/${{ steps.mono_sha.outputs.sha }}" || true
 
+      - name: Bytecode hygiene gate
+        env:
+          PLUGIN_DIR: plugins-src/stitch-${{ matrix.plugin }}
+        run: |
+          if ! git -C "$PLUGIN_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+            echo "::notice::$PLUGIN_DIR is not a git checkout — skipping bytecode hygiene gate"
+            exit 0
+          fi
+          DIRT=$(git -C "$PLUGIN_DIR" ls-files | grep -E '\.pyc$|__pycache__/' || true)
+          if [ -n "$DIRT" ]; then
+            echo "$DIRT"
+            echo "::error::Tracked bytecode caches in $PLUGIN_DIR: $(echo "$DIRT" | tr '\n' ' ')— fix in the plugin repo: git rm -r --cached <paths>, then add '__pycache__/' and '*.pyc' to .gitignore"
+            exit 1
+          fi
+          echo "Bytecode hygiene OK: no tracked .pyc/__pycache__ in $PLUGIN_DIR"
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
