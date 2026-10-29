@@ -155,6 +155,9 @@ jobs:
           python - <<'PYEOF'
           import asyncio, os
           from pathlib import Path
+
+          import httpx
+
           from autoreg.plugin import crypto
           from stitch_plugin_tools.publish import publish_package
 
@@ -168,13 +171,22 @@ jobs:
               sig = crypto.sign_package(base, key)
               crypto.write_signature(base, sig)
 
-              result = await publish_package(
-                  base,
-                  server_url=publish_url,
-                  admin_key=admin_key,
-                  signing_key_pem=None,
-                  rollout_percent=100,
-              )
+              try:
+                  result = await publish_package(
+                      base,
+                      server_url=publish_url,
+                      admin_key=admin_key,
+                      signing_key_pem=None,
+                      rollout_percent=100,
+                  )
+              except httpx.HTTPStatusError as exc:
+                  if exc.response.status_code != 409:
+                      raise
+                  print(
+                      f"::warning::{name} {os.environ['PACK_VERSION']} already published; "
+                      "server artifacts are immutable, keeping the existing one"
+                  )
+                  return
               print(f'Published {name}: {result}')
 
           asyncio.run(main())

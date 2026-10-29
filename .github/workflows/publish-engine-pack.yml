@@ -100,6 +100,9 @@ jobs:
           python -c "
           import asyncio, os, shutil
           from pathlib import Path
+
+          import httpx
+
           from autoreg.plugin import crypto
           from stitch_plugin_tools.publish import publish_package
           from stitch_plugin_tools.watermark import inject_watermark
@@ -113,6 +116,26 @@ jobs:
               manifest = crypto.read_manifest(base)
               plugin_id = manifest.id
               version = manifest.version
+
+              async def publish_idempotent(dir_, label, **kwargs):
+                  try:
+                      result = await publish_package(
+                          dir_,
+                          server_url=publish_url,
+                          admin_key=admin_key,
+                          signing_key_pem=None,
+                          rollout_percent=100,
+                          **kwargs,
+                      )
+                  except httpx.HTTPStatusError as exc:
+                      if exc.response.status_code != 409:
+                          raise
+                      print(
+                          f'::warning::{label} already published; '
+                          'server artifacts are immutable, keeping the existing one'
+                      )
+                      return
+                  print(f'Published {label}: {result}')
 
               # Probe whether the engine-pack carries a scenario.json with
               # selector_candidates.  inject_watermark returns False when
@@ -144,14 +167,7 @@ jobs:
                   shutil.copytree(base, legacy_dir)
                   sig = crypto.sign_package(legacy_dir, key)
                   crypto.write_signature(legacy_dir, sig)
-                  result = await publish_package(
-                      legacy_dir,
-                      server_url=publish_url,
-                      admin_key=admin_key,
-                      signing_key_pem=None,
-                      rollout_percent=100,
-                  )
-                  print(f'Published legacy (non-variant): {result}')
+                  await publish_idempotent(legacy_dir, 'legacy (non-variant)')
                   return
 
               for idx in range(n):
@@ -170,15 +186,8 @@ jobs:
                   sig = crypto.sign_package(variant_dir, key)
                   crypto.write_signature(variant_dir, sig)
                   # Publish as variant idx.
-                  result = await publish_package(
-                      variant_dir,
-                      server_url=publish_url,
-                      admin_key=admin_key,
-                      signing_key_pem=None,  # already signed above
-                      rollout_percent=100,
-                      variant_index=idx,
-                  )
-                  print(f'Published variant {idx}/{n}: {result}')
+                  await publish_idempotent(
+                      variant_dir, f'variant {idx}/{n}', variant_index=idx)
               # Also publish a non-variant (legacy) copy for fallback.
               legacy_dir = Path('/tmp/engine-pack-legacy')
               if legacy_dir.exists():
@@ -186,14 +195,7 @@ jobs:
               shutil.copytree(base, legacy_dir)
               sig = crypto.sign_package(legacy_dir, key)
               crypto.write_signature(legacy_dir, sig)
-              result = await publish_package(
-                  legacy_dir,
-                  server_url=publish_url,
-                  admin_key=admin_key,
-                  signing_key_pem=None,
-                  rollout_percent=100,
-              )
-              print(f'Published legacy (non-variant): {result}')
+              await publish_idempotent(legacy_dir, 'legacy (non-variant)')
 
           asyncio.run(main())
           "
