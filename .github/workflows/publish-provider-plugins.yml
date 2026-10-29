@@ -153,6 +153,8 @@ jobs:
           import asyncio, os, sys, tempfile
           from pathlib import Path
 
+          import httpx
+
           signing_key = os.environ.get("STITCH_SIGNING_KEY", "")
           publish_url = os.environ.get("STITCH_PUBLISH_URL", "")
           admin_key = os.environ.get("STITCH_ADMIN_KEY", "")
@@ -181,14 +183,24 @@ jobs:
                   )
                   return
 
-              result = await publish_package(
-                  base,
-                  server_url=publish_url,
-                  admin_key=admin_key,
-                  signing_key_pem=None,
-                  rollout_percent=100,
-                  platform=platform,
-              )
+              try:
+                  result = await publish_package(
+                      base,
+                      server_url=publish_url,
+                      admin_key=admin_key,
+                      signing_key_pem=None,
+                      rollout_percent=100,
+                      platform=platform,
+                  )
+              except httpx.HTTPStatusError as exc:
+                  if exc.response.status_code != 409:
+                      raise
+                  print(
+                      f"::warning::{provider_id} [{platform}] "
+                      f"{os.environ['PACK_VERSION']} already published; "
+                      "server artifacts are immutable, keeping the existing one"
+                  )
+                  return
               print(f"Published {provider_id} [{platform}]: {result}")
 
           asyncio.run(main())
