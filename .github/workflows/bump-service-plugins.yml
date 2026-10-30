@@ -2,8 +2,6 @@ name: Bump service plugin submodules
 
 on:
   workflow_dispatch: {}
-  schedule:
-    - cron: '37 4 * * *' # daily, staggered from sync-from-public
 
 concurrency:
   group: bump-service-plugins

@@ -2,7 +2,7 @@ name: HoloNe rules sync
 
 # Farm port of the hub's holone-rules-sync.yml (hub Actions are disabled;
 # this public CI farm is the only CI/CD control plane). Runs on the hub
-# checkout (read-only) weekly Monday 05:23 UTC or via the manual button;
+# checkout (read-only) via the manual button;
 # opening the refresh PR on the hub needs MONOREPO_WRITE_TOKEN (skips
 # cleanly while unset).
 #
@@ -14,9 +14,6 @@ name: HoloNe rules sync
 
 on:
   workflow_dispatch:
-  schedule:
-    # Weekly, Monday 05:23 UTC (off-peak minute to avoid scheduler contention).
-    - cron: '23 5 * * 1'
 
 concurrency:
   group: holone-rules-sync

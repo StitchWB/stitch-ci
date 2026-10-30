@@ -3,8 +3,6 @@ name: Public history scan
 # GitHub keeps refs/pull/* forever, so purged public history can re-expose via PR refs.
 
 on:
-  schedule:
-    - cron: "43 2 * * *"
   workflow_dispatch: {}
 
 concurrency:

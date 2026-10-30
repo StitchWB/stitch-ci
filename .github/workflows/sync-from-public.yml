@@ -4,13 +4,10 @@ name: Sync Zone-1 from public
 # the private hub (StitchWB/Stitch-Account-Manager) as a reviewable auto-PR,
 # so the full release build compiles against the latest client code.  Runs
 # on this public repo's free minutes; the hub's own Actions are disabled.
-# Triggered by the daily cron below or the manual "Run workflow" button.
+# Triggered via the manual "Run workflow" button.
 
 on:
   workflow_dispatch: {}
-  schedule:
-    # Daily at 04:17 UTC (off-peak minute to avoid scheduler contention).
-    - cron: '17 4 * * *'
 
 concurrency:
   group: sync-from-public

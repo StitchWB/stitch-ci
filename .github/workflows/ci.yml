@@ -5,7 +5,7 @@ name: CI
 # read-only (MONOREPO_READ_TOKEN) and runs that contract on free minutes.
 #
 # BUTTONS: "Run workflow" shows a `repo` dropdown — pick one repo, or `all` to
-# fan out across the whole matrix.  Nightly cron runs everything.
+# fan out across the whole matrix.
 
 on:
   workflow_dispatch:
@@ -38,8 +38,6 @@ on:
         type: string
         required: false
         default: ""
-  schedule:
-    - cron: "17 3 * * *"
 
 concurrency:
   group: stitch-ci
