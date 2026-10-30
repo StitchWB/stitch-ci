@@ -1,0 +1,37 @@
+name: Public history scan
+
+# GitHub keeps refs/pull/* forever, so purged public history can re-expose via PR refs.
+
+on:
+  schedule:
+    - cron: "43 2 * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: public-history-scan
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    name: Scan public repo history for P0 leaks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout hub
+        uses: actions/checkout@v4
+        with:
+          repository: StitchWB/Stitch-Account-Manager
+          token: ${{ secrets.MONOREPO_READ_TOKEN }}
+          submodules: recursive
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Clone public repo with PR refs
+        run: |
+          git clone https://github.com/StitchWB/Stitch-Manager.git sm-public
+          git -C sm-public fetch origin '+refs/pull/*/head:refs/remotes/pr/*'
+
+      - name: Scan public history
+        run: python scripts/scan_public_history.py --repo sm-public --max-commits 50
