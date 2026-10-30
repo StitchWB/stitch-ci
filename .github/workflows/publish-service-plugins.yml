@@ -22,12 +22,74 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  prepare:
+    name: Build publish matrix from the classifier
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.classify.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: StitchWB/Stitch-Account-Manager
+          token: ${{ secrets.MONOREPO_READ_TOKEN }}
+          submodules: recursive
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          pip install -e python/
+          pip install httpx
+
+      - name: Classify service plugins
+        id: classify
+        shell: python
+        run: |
+          import json
+          import os
+          import subprocess
+          import sys
+          from pathlib import Path
+
+          plugins = []
+          skipped = []
+          for entry in sorted(Path("plugins-src").iterdir()):
+              manifest = entry / "plugin.json"
+              if not entry.is_dir() or not manifest.is_file():
+                  continue
+              if not entry.name.startswith("stitch-"):
+                  print(f"::error::plugins-src/{entry.name} has no stitch- prefix")
+                  sys.exit(1)
+              proc = subprocess.run(
+                  [sys.executable, "-m", "stitch_plugin_tools", "classify", entry.as_posix()],
+                  capture_output=True,
+                  text=True,
+              )
+              if proc.returncode != 0:
+                  print(f"::error::classify failed for {entry.name}: {proc.stderr.strip()}")
+                  sys.exit(1)
+              verdict = json.loads(proc.stdout)
+              if verdict.get("class") == "open-core" and verdict.get("channel") == "public":
+                  plugins.append(entry.name[len("stitch-"):])
+              else:
+                  skipped.append(f"{entry.name} ({verdict.get('class')})")
+          if not plugins:
+              print("::error::classifier returned no publishable service plugins")
+              sys.exit(1)
+          print(f"publishing: {', '.join(plugins)}")
+          print(f"skipped by policy: {', '.join(skipped) or 'none'}")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
+              f.write("matrix=" + json.dumps({"plugin": plugins}) + "\n")
+
   publish:
+    needs: prepare
     name: Assemble, sign, and publish ${{ matrix.plugin }} service plugin
     runs-on: ubuntu-latest
     strategy:
-      matrix:
-        plugin: [antigravity, bridges, domains, freemodel, leonardo, mail, notebooklm, opencode, radar, relaycheck, sheets, totp]
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
       fail-fast: false
     steps:
       - uses: actions/checkout@v4
