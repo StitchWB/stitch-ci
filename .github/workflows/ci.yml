@@ -73,6 +73,7 @@ jobs:
           token: ${{ secrets.MONOREPO_READ_TOKEN }}
           submodules: recursive
           ref: ${{ github.event.inputs.ref }}
+          fetch-depth: 0
 
       - name: Resolve tested sha
         if: steps.gate.outputs.run == 'true'
@@ -126,6 +127,10 @@ jobs:
         if: steps.gate.outputs.run == 'true' && matrix.repo == 'StitchWB/Stitch-Account-Manager'
         working-directory: python
         run: python scripts/check_vendor_drift.py
+
+      - name: Zone-1 drift check
+        if: steps.gate.outputs.run == 'true' && matrix.repo == 'StitchWB/Stitch-Account-Manager'
+        run: python scripts/check_zone1_drift.py
 
       - name: Report final status
         if: always() && steps.gate.outputs.run == 'true' && matrix.repo == 'StitchWB/Stitch-Account-Manager'
