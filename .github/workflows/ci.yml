@@ -97,6 +97,10 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Zone-1 drift check
+        if: steps.gate.outputs.run == 'true' && matrix.repo == 'StitchWB/Stitch-Account-Manager'
+        run: python scripts/check_zone1_drift.py
+
       - name: Read .ci.yml contract
         if: steps.gate.outputs.run == 'true'
         id: ci
@@ -127,10 +131,6 @@ jobs:
         if: steps.gate.outputs.run == 'true' && matrix.repo == 'StitchWB/Stitch-Account-Manager'
         working-directory: python
         run: python scripts/check_vendor_drift.py
-
-      - name: Zone-1 drift check
-        if: steps.gate.outputs.run == 'true' && matrix.repo == 'StitchWB/Stitch-Account-Manager'
-        run: python scripts/check_zone1_drift.py
 
       - name: Report final status
         if: always() && steps.gate.outputs.run == 'true' && matrix.repo == 'StitchWB/Stitch-Account-Manager'
