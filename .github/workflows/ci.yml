@@ -38,6 +38,13 @@ on:
         type: string
         required: false
         default: ""
+      slow:
+        description: "Also run the slow pass from `.ci.yml` slow_test (browsers/CLIs/servers)"
+        type: choice
+        options:
+          - "false"
+          - "true"
+        default: "false"
 
 concurrency:
   group: stitch-ci
@@ -47,6 +54,7 @@ jobs:
   ci:
     name: "CI: ${{ matrix.repo }}"
     runs-on: ubuntu-latest
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
@@ -74,6 +82,16 @@ jobs:
           submodules: recursive
           ref: ${{ github.event.inputs.ref }}
           fetch-depth: 0
+
+      # No lockfile is guaranteed (AIApiRadar has none), so hashFiles may be empty; the key stays stable.
+      - name: Cache pip
+        if: steps.gate.outputs.run == 'true'
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ runner.os }}-${{ matrix.repo }}-${{ hashFiles('**/pyproject.toml', '**/requirements*.txt') }}
+          restore-keys: |
+            pip-${{ runner.os }}-${{ matrix.repo }}-
 
       - name: Resolve tested sha
         if: steps.gate.outputs.run == 'true'
@@ -115,12 +133,38 @@ jobs:
               f.write("workdir=" + str(cfg.get("workdir", ".") or ".") + "\n")
               f.write("install=" + str(cfg.get("install", "") or "") + "\n")
               f.write("test=" + str(cfg.get("test", "") or "") + "\n")
+              f.write("slow_test=" + str(cfg.get("slow_test", "") or "") + "\n")
           PY
 
       - name: Install deps
         if: steps.gate.outputs.run == 'true' && steps.ci.outputs.install != ''
         working-directory: ${{ steps.ci.outputs.workdir }}
         run: ${{ steps.ci.outputs.install }}
+
+      # A hang must surface as a FAILED test with a log, never as a runner killed with no log.
+      - name: Timeout guard self-check
+        if: steps.gate.outputs.run == 'true' && matrix.repo == 'StitchWB/Stitch-Account-Manager'
+        working-directory: ${{ steps.ci.outputs.workdir }}
+        run: |
+          python - <<'PY'
+          import pathlib, signal, subprocess, sys, tempfile, textwrap
+
+          assert hasattr(signal, "SIGALRM"), "no SIGALRM: pytest-timeout would fall back to thread mode"
+          with tempfile.TemporaryDirectory() as tmp:
+              pathlib.Path(tmp, "test_hang.py").write_text(
+                  textwrap.dedent("import time\n\ndef test_hangs():\n    time.sleep(60)\n"),
+                  encoding="utf-8",
+              )
+              proc = subprocess.run(
+                  [sys.executable, "-m", "pytest", "test_hang.py", "-q", "-p", "no:cacheprovider",
+                   "--timeout=3", "--timeout-method=signal"],
+                  cwd=tmp, capture_output=True, text=True, timeout=120,
+              )
+              out = proc.stdout + proc.stderr
+              assert proc.returncode == 1, f"expected FAILED exit, got {proc.returncode}\n{out}"
+              assert "Timeout" in out, out
+              print("timeout guard OK: a hung test is reported FAILED with a log")
+          PY
 
       - name: Run tests
         if: steps.gate.outputs.run == 'true' && steps.ci.outputs.test != ''
@@ -145,6 +189,68 @@ jobs:
             -H "Accept: application/vnd.github+json" \
             -d "{\"state\":\"$STATE\",\"context\":\"stitch-ci/python\",\"target_url\":\"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}" \
             "https://api.github.com/repos/StitchWB/Stitch-Account-Manager/statuses/${{ steps.mono_sha.outputs.sha }}" || true
+
+  ci-slow:
+    name: "Slow: ${{ matrix.repo }}"
+    if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.slow == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        repo:
+          - StitchWB/Stitch-Account-Manager
+    steps:
+      - name: Selection gate
+        id: gate
+        run: |
+          if [ "${{ github.event.inputs.repo }}" = "all" ] || [ "${{ github.event.inputs.repo }}" = "${{ matrix.repo }}" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: "Checkout ${{ matrix.repo }} (read-only)"
+        if: steps.gate.outputs.run == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ matrix.repo }}
+          token: ${{ secrets.MONOREPO_READ_TOKEN }}
+          submodules: recursive
+          ref: ${{ github.event.inputs.ref }}
+          fetch-depth: 0
+
+      - name: Setup Python
+        if: steps.gate.outputs.run == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Read .ci.yml contract
+        if: steps.gate.outputs.run == 'true'
+        id: ci
+        run: |
+          pip install -q pyyaml
+          python - <<'PY'
+          import os, yaml
+          cfg = {}
+          if os.path.exists(".ci.yml"):
+              cfg = yaml.safe_load(open(".ci.yml", encoding="utf-8")) or {}
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write("workdir=" + str(cfg.get("workdir", ".") or ".") + "\n")
+              f.write("install=" + str(cfg.get("install", "") or "") + "\n")
+              f.write("slow_test=" + str(cfg.get("slow_test", "") or "") + "\n")
+          PY
+
+      - name: Install deps
+        if: steps.gate.outputs.run == 'true' && steps.ci.outputs.install != ''
+        working-directory: ${{ steps.ci.outputs.workdir }}
+        run: ${{ steps.ci.outputs.install }}
+
+      - name: Run slow tests
+        if: steps.gate.outputs.run == 'true' && steps.ci.outputs.slow_test != ''
+        working-directory: ${{ steps.ci.outputs.workdir }}
+        run: ${{ steps.ci.outputs.slow_test }}
 
   frontend:
     name: "Frontend: StitchWB/Stitch-Account-Manager"
