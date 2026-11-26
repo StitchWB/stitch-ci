@@ -38,13 +38,37 @@ jobs:
     steps:
       # Build FROM the public repo (Zone-1 source of truth), not from a
       # monorepo export — external PRs merged there must reach the binary.
+      # Do NOT pass ref: inputs.tag here — the tag is created on the HUB by
+      # auto-release and does not exist in the public repo yet, so checkout
+      # would fail on the first run of a fresh tag. Checkout the default
+      # branch (main) instead; the next step creates the tag at this commit
+      # (or checks out the pre-existing tag on rebuilds).
       - name: Checkout Stitch-Manager (public Zone-1 source)
         uses: actions/checkout@v4
         with:
           repository: StitchWB/Stitch-Manager
           token: ${{ secrets.RELEASES_PAT }}
-          ref: ${{ inputs.tag }}
           path: public
+
+      # Resolve the chicken-and-egg tag: `gh release create` in the publish
+      # job can create the tag, but the build needs a stable ref BEFORE that.
+      # If the tag is missing, create + push it at the current main HEAD —
+      # credentials are persisted by actions/checkout (RELEASES_PAT).
+      - name: Ensure release tag exists in public repo
+        shell: bash
+        working-directory: public
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          if git ls-remote --tags origin | grep -q "refs/tags/${TAG}$"; then
+            echo "Tag $TAG already exists in public repo — checking it out for a reproducible rebuild"
+            git fetch --depth=1 origin "refs/tags/${TAG}:refs/tags/${TAG}"
+            git checkout "$TAG"
+          else
+            echo "Tag $TAG missing in public repo — creating it at main HEAD ($(git rev-parse --short HEAD))"
+            git tag "$TAG"
+            git push origin "$TAG"
+          fi
 
       - name: Setup Python
         uses: actions/setup-python@v5
