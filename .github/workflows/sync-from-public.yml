@@ -84,8 +84,17 @@ jobs:
           git commit -m "chore(sync): mirror Zone-1 from Stitch-Manager (automated public->hub sync)"
           git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/StitchWB/Stitch-Account-Manager.git"
           git push -u origin "$BRANCH"
-          gh pr create \
+          PR_URL=$(gh pr create \
             --title "chore(sync): mirror Zone-1 from Stitch-Manager" \
             --body "Automated Zone-1 mirror (public -> hub). Stitch-Manager is the source of truth for the client; this PR carries its latest Zone-1 into the hub for the full release build. Review and merge." \
             --base master \
-            --head "$BRANCH"
+            --head "$BRANCH")
+          echo "Opened $PR_URL"
+          # The hub has no branch protection and no required checks: a sync PR
+          # gates nothing, so leaving it open just strands the mirror (this
+          # exact failure stranded PR #79 until merged by hand). Merge it
+          # immediately; the PR still exists in the git history as the audit
+          # trail. If the merge itself fails (e.g. conflict with concurrent
+          # master pushes), fail the run loudly instead of silently drifting.
+          gh pr merge "$PR_URL" --merge
+          echo "Merged $PR_URL"
