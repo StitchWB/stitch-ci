@@ -44,6 +44,7 @@ jobs:
         with:
           repository: StitchWB/Stitch-Account-Manager
           token: ${{ secrets.SUBMODULE_READ_TOKEN }}
+          ref: ${{ inputs.tag }}
           submodules: recursive
 
       - name: Resolve tested sha
